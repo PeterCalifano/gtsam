@@ -226,6 +226,31 @@ Rules for MATLAB `CustomFactor` callbacks:
 - The residual dimension must match the noise model dimension.
 - Keys may be passed either as a numeric array or as a `gtsam.KeyVector`.
 
+The optional fourth constructor argument selects the callback's values scope:
+
+```matlab
+factor = CustomFactor(model, keys, @myErrorFunction, "factorKeys");
+```
+
+The default, `"all"`, preserves access to every supplied value. `"factorKeys"`
+copies only the factor's declared keys; all those keys must exist, and access to
+unrelated keys is unavailable. This avoids cloning unrelated graph values on
+every residual or Jacobian evaluation. Choose it only for callbacks that use
+declared keys exclusively, including any inspection of `values.size()` or
+`values.keys()`. Both modes pass an owning snapshot with the original value
+types and exact keys. Callbacks may retain or modify that snapshot without
+changing the optimizer's values. Jacobian blocks remain in factor-key order,
+regardless of the ordering of the snapshot's keys.
+
+Residuals and Jacobian blocks must be full, real double arrays. Jacobian rows
+must match the residual dimension, and columns must match each value's tangent
+dimension. Callback failures release their temporary arrays and unwind C++
+optimizer state through the existing generic wrapper exception boundary. The
+resulting message includes the callback's original identifier and stack report.
+The outer MATLAB exception identifier is empty, as produced by the generic
+wrapper boundary. This changes the specific identifiers previously raised for
+malformed callback outputs, including in the default `"all"` mode.
+
 Practical notes:
 
 - `unwhitenedError(...)` exercises the residual-only path.
@@ -242,7 +267,11 @@ Wrapped overloaded methods such as `factor.unwhitenedError` still need an
 explicit lambda when passed as callbacks in MATLAB.
 
 - Optimization usually exercises both the residual and Jacobian paths.
-- Deleting the MATLAB factor removes its callback from the MATLAB-side registry, so repeated tests in one session do not accumulate stale entries.
+- Keep MATLAB factors alive until all graphs, optimizers and optimizer copies
+  using them have been destroyed. Then explicitly delete the factors to remove
+  their callback registrations. Clearing a variable alone does not release the
+  registry's reference. Graph/ISAM2 copies share factor ownership; deep graph
+  `clone()` and `rekey()` are not implemented for this adapter.
 - Once a MATLAB `CustomFactor` has been constructed, the mex module is intentionally kept loaded for the rest of the MATLAB session to avoid unload-time crashes while callback-backed native factors are still reachable from C++.
 
 ## MATLAB CustomFactor Under the Hood
@@ -260,13 +289,13 @@ Files involved:
 Call path:
 
 1. `gtsam.CustomFactor(noiseModel, keys, errorFunc)` registers `errorFunc` in `gtsam.customFactorRegistry` and gets back a numeric callback ID.
-2. The MATLAB facade constructs the native `gtsam.MatlabCustomFactor`, passing only the noise model, keys, and callback ID into C++.
+2. The MATLAB facade constructs the native `gtsam.MatlabCustomFactor`, passing the noise model, keys, callback ID, and values-scope flag into C++.
 3. After construction, the MATLAB facade binds the final MATLAB `gtsam.CustomFactor` object into the registry under the same callback ID.
 4. When GTSAM evaluates the factor in C++, `MatlabCustomFactor` calls back into MATLAB with:
    `gtsam.customFactorRegistry('invoke', callbackId, values)`.
 5. The registry looks up the stored MATLAB factor object and function handle, then invokes:
    `errorFunc(this, values)` or `[error, H] = errorFunc(this, values)`.
-6. The native wrapper validates the residual size and Jacobian count, converts the outputs back into GTSAM types, and returns them to the optimizer.
+6. The native wrapper validates output storage, residual size, and Jacobian count and dimensions, converts the outputs back into GTSAM types, and returns them to the optimizer.
 
 Why there is a registry instead of storing the MATLAB function handle directly
 in C++:

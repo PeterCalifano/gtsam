@@ -8,6 +8,9 @@ classdef CustomFactor < gtsam.MatlabCustomFactor
     function obj = CustomFactor(varargin)
       % Public constructor:
       %   CustomFactor(noiseModel, keys, errorFunc)
+      %   CustomFactor(noiseModel, keys, errorFunc, valuesScope)
+      % valuesScope is 'all' (default) or 'factorKeys'. Both pass an owning
+      % snapshot; 'factorKeys' copies only the declared keys, which must exist.
       %
       % Internal pointer constructor:
       %   CustomFactor(uint64_magic, ptr[, 'void'])
@@ -19,7 +22,6 @@ classdef CustomFactor < gtsam.MatlabCustomFactor
       %   errorFunc(this, values)
       % or
       %   [error, H] = errorFunc(this, values)
-      constructedArgs = {};
       callbackId = uint64(0);
 
       if (nargin == 2 || (nargin == 3 && strcmp(varargin{3}, 'void'))) && ...
@@ -27,15 +29,30 @@ classdef CustomFactor < gtsam.MatlabCustomFactor
           varargin{1} == uint64(5139824614673773682)
         constructedArgs = varargin;
       else
-        if nargin ~= 3
+        if nargin ~= 3 && nargin ~= 4
           error(['Arguments do not match any overload of gtsam.CustomFactor ', ...
                  'constructor']);
         end
 
         noiseModel = varargin{1};
         keys = gtsam.CustomFactor.normalizeKeys(varargin{2});
+        valuesScope = 'all';
+        if nargin == 4
+          valuesScope = varargin{4};
+        end
+        if ~((ischar(valuesScope) && isrow(valuesScope)) || ...
+             (isstring(valuesScope) && isscalar(valuesScope))) || ...
+            ~any(strcmp(valuesScope, {'all', 'factorKeys'}))
+          error('gtsam:CustomFactor:invalidValuesScope', ...
+                'valuesScope must be ''all'' or ''factorKeys''.');
+        end
         callbackId = gtsam.customFactorRegistry('register', varargin{3});
-        constructedArgs = {noiseModel, keys, callbackId};
+        % Superclass calls cannot be inside try/catch in MATLAB constructors.
+        % An unbound registration is removed if construction fails.
+        rollback = onCleanup(@() gtsam.customFactorRegistry( ...
+            'removeIfUnbound', callbackId));
+        constructedArgs = {noiseModel, keys, callbackId, ...
+                           strcmp(valuesScope, 'factorKeys')};
       end
 
       obj = obj@gtsam.MatlabCustomFactor(constructedArgs{:});

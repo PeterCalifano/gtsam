@@ -12,6 +12,9 @@ virtual class MatlabCustomFactor : gtsam::NoiseModelFactor {
   MatlabCustomFactor(gtsam::noiseModel::Base* noiseModel,
                      const gtsam::KeyVector& keys,
                      size_t callbackId);
+  MatlabCustomFactor(gtsam::noiseModel::Base* noiseModel,
+                     const gtsam::KeyVector& keys,
+                     size_t callbackId, bool factorKeysOnly);
 };
 
 }  // namespace gtsam

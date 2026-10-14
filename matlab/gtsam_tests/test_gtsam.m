@@ -24,6 +24,9 @@ testValues
 display 'Starting: testCustomFactor'
 testCustomFactor
 
+display 'Starting: testCustomFactorValuesScope'
+testCustomFactorValuesScope
+
 display 'Starting: testQcqpProblem'
 testQcqpProblem
 
