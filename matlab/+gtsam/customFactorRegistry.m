@@ -56,11 +56,15 @@ switch operation
             varargout{1} = entry.callback(entry.factor, varargin{2:end});
         end
 
-    case 'remove'
+    case {'remove', 'removeIfUnbound'}
         callbackId = varargin{1};
         key = callbackKey(callbackId);
         if isKey(callbacks, key)
-            remove(callbacks, key);
+            % Constructor rollback must not remove a successfully bound factor.
+            entry = callbacks(key);
+            if strcmp(operation, 'remove') || isempty(entry.factor)
+                remove(callbacks, key);
+            end
         end
 
     case 'count'

@@ -24,6 +24,9 @@ testValues
 display 'Starting: testCustomFactor'
 testCustomFactor
 
+display 'Starting: testCustomFactorValuesScope'
+testCustomFactorValuesScope
+
 %% SLAM
 display 'Starting: testPriorFactor'
 testPriorFactor
