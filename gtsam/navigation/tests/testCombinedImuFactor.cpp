@@ -35,6 +35,7 @@
 
 #include <array>
 #include <list>
+#include <type_traits>
 
 #include "imuFactorTesting.h"
 
@@ -123,7 +124,13 @@ TEST_PIM(CombinedImuFactor, ReturnedDynamicsReconstructCovariance) {
 
     EXPECT(step.gyroSampleCovariance.isApprox(
         params->gyroscopeCovariance / intervals[index], 1e-12));
-    EXPECT(step.gyroNoiseMap.bottomRows(12).isZero(1e-12));
+    // Gyro noise never enters the bias rows. It reaches position and velocity
+    // only for Galilean preintegration, as no sensor pose is set here.
+    EXPECT(step.gyroNoiseMap.bottomRows(6).isZero(1e-12));
+    if constexpr (!std::is_same_v<CombinedPIM,
+                                  PreintegratedCombinedMeasurementsG>) {
+      EXPECT(step.gyroNoiseMap.middleRows(3, 6).isZero(1e-12));
+    }
   }
 }
 

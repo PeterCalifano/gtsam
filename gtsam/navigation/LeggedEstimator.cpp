@@ -172,8 +172,22 @@ void addNavigationPrior(NonlinearFactorGraph& factors, Key poseKey,
   const Expression<NavState> navigationState(NavState::FromPoseVelocity,
                                              Expression<Pose3>(poseKey),
                                              Expression<Vector3>(velocityKey));
-  factors.emplace_shared<ExpressionFactor<NavState>>(
-      Gaussian::Covariance(covariance), state, navigationState);
+  // Use the residual and Jacobian of PriorFactor<NavState>, so the split-state
+  // smoother matches the NavState smoother in either chart-Jacobian build.
+  auto priorError = [state](const NavState& estimate,
+                            OptionalJacobian<9, 9> H) -> Vector9 {
+#ifdef GTSAM_SLOW_BUT_CORRECT_BETWEENFACTOR
+    const Vector9 error = -estimate.localCoordinates(state, H);
+    if (H) *H = -*H;
+    return error;
+#else
+    if (H) H->setIdentity();
+    return -estimate.localCoordinates(state);
+#endif
+  };
+  factors.emplace_shared<ExpressionFactor<Vector9>>(
+      Gaussian::Covariance(covariance), Vector9::Zero(),
+      Expression<Vector9>(priorError, navigationState));
 }
 
 Key initializationFootKey(size_t foot) {
