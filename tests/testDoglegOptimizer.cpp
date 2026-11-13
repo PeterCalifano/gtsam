@@ -22,7 +22,7 @@
 #include <gtsam/geometry/Pose2.h>
 #include <gtsam/nonlinear/DoglegOptimizer.h>
 #include <gtsam/nonlinear/DoglegOptimizerImpl.h>
-#include <gtsam/nonlinear/NonlinearEquality.h>
+#include <gtsam/constrained/NonlinearEquality.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam/slam/SmartProjectionPoseFactor.h>
@@ -41,21 +41,20 @@ TEST(DoglegOptimizer, ComputeBlend) {
   // Create an arbitrary Bayes Net
   GaussianBayesNet gbn;
   gbn.emplace_shared<GaussianConditional>(
-      0, Vector2(1.0,2.0), (Matrix(2, 2) << 3.0,4.0,0.0,6.0).finished(),
-      3, (Matrix(2, 2) << 7.0,8.0,9.0,10.0).finished(),
-      4, (Matrix(2, 2) << 11.0,12.0,13.0,14.0).finished());
-  gbn.emplace_shared<GaussianConditional>(
-      1, Vector2(15.0,16.0), (Matrix(2, 2) << 17.0,18.0,0.0,20.0).finished(),
-      2, (Matrix(2, 2) << 21.0,22.0,23.0,24.0).finished(),
-      4, (Matrix(2, 2) << 25.0,26.0,27.0,28.0).finished());
-  gbn.emplace_shared<GaussianConditional>(
-      2, Vector2(29.0,30.0), (Matrix(2, 2) << 31.0,32.0,0.0,34.0).finished(),
-      3, (Matrix(2, 2) << 35.0,36.0,37.0,38.0).finished());
-  gbn.emplace_shared<GaussianConditional>(
-      3, Vector2(39.0,40.0), (Matrix(2, 2) << 41.0,42.0,0.0,44.0).finished(),
-      4, (Matrix(2, 2) << 45.0,46.0,47.0,48.0).finished());
-  gbn.emplace_shared<GaussianConditional>(
-      4, Vector2(49.0,50.0), (Matrix(2, 2) << 51.0,52.0,0.0,54.0).finished());
+      0, Vector2(1.0, 2.0), Matrix{{3.0, 4.0}, {0.0, 6.0}}, 3,
+      Matrix{{7.0, 8.0}, {9.0, 10.0}}, 4, Matrix{{11.0, 12.0}, {13.0, 14.0}});
+  gbn.emplace_shared<GaussianConditional>(1, Vector2(15.0, 16.0),
+                                          Matrix{{17.0, 18.0}, {0.0, 20.0}}, 2,
+                                          Matrix{{21.0, 22.0}, {23.0, 24.0}}, 4,
+                                          Matrix{{25.0, 26.0}, {27.0, 28.0}});
+  gbn.emplace_shared<GaussianConditional>(2, Vector2(29.0, 30.0),
+                                          Matrix{{31.0, 32.0}, {0.0, 34.0}}, 3,
+                                          Matrix{{35.0, 36.0}, {37.0, 38.0}});
+  gbn.emplace_shared<GaussianConditional>(3, Vector2(39.0, 40.0),
+                                          Matrix{{41.0, 42.0}, {0.0, 44.0}}, 4,
+                                          Matrix{{45.0, 46.0}, {47.0, 48.0}});
+  gbn.emplace_shared<GaussianConditional>(4, Vector2(49.0, 50.0),
+                                          Matrix{{51.0, 52.0}, {0.0, 54.0}});
 
   // Compute steepest descent point
   VectorValues xu = gbn.optimizeGradientSearch();
@@ -95,21 +94,20 @@ TEST(DoglegOptimizer, ComputeDoglegPoint) {
   // Create an arbitrary Bayes Net
   GaussianBayesNet gbn;
   gbn.emplace_shared<GaussianConditional>(
-      0, Vector2(1.0,2.0), (Matrix(2, 2) << 3.0,4.0,0.0,6.0).finished(),
-      3, (Matrix(2, 2) << 7.0,8.0,9.0,10.0).finished(),
-      4, (Matrix(2, 2) << 11.0,12.0,13.0,14.0).finished());
-  gbn.emplace_shared<GaussianConditional>(
-      1, Vector2(15.0,16.0), (Matrix(2, 2) << 17.0,18.0,0.0,20.0).finished(),
-      2, (Matrix(2, 2) << 21.0,22.0,23.0,24.0).finished(),
-      4, (Matrix(2, 2) << 25.0,26.0,27.0,28.0).finished());
-  gbn.emplace_shared<GaussianConditional>(
-      2, Vector2(29.0,30.0), (Matrix(2, 2) << 31.0,32.0,0.0,34.0).finished(),
-      3, (Matrix(2, 2) << 35.0,36.0,37.0,38.0).finished());
-  gbn.emplace_shared<GaussianConditional>(
-      3, Vector2(39.0,40.0), (Matrix(2, 2) << 41.0,42.0,0.0,44.0).finished(),
-      4, (Matrix(2, 2) << 45.0,46.0,47.0,48.0).finished());
-  gbn.emplace_shared<GaussianConditional>(
-      4, Vector2(49.0,50.0), (Matrix(2, 2) << 51.0,52.0,0.0,54.0).finished());
+      0, Vector2(1.0, 2.0), Matrix{{3.0, 4.0}, {0.0, 6.0}}, 3,
+      Matrix{{7.0, 8.0}, {9.0, 10.0}}, 4, Matrix{{11.0, 12.0}, {13.0, 14.0}});
+  gbn.emplace_shared<GaussianConditional>(1, Vector2(15.0, 16.0),
+                                          Matrix{{17.0, 18.0}, {0.0, 20.0}}, 2,
+                                          Matrix{{21.0, 22.0}, {23.0, 24.0}}, 4,
+                                          Matrix{{25.0, 26.0}, {27.0, 28.0}});
+  gbn.emplace_shared<GaussianConditional>(2, Vector2(29.0, 30.0),
+                                          Matrix{{31.0, 32.0}, {0.0, 34.0}}, 3,
+                                          Matrix{{35.0, 36.0}, {37.0, 38.0}});
+  gbn.emplace_shared<GaussianConditional>(3, Vector2(39.0, 40.0),
+                                          Matrix{{41.0, 42.0}, {0.0, 44.0}}, 4,
+                                          Matrix{{45.0, 46.0}, {47.0, 48.0}});
+  gbn.emplace_shared<GaussianConditional>(4, Vector2(49.0, 50.0),
+                                          Matrix{{51.0, 52.0}, {0.0, 54.0}});
 
   // Compute dogleg point for different deltas
 
@@ -194,6 +192,33 @@ TEST(DoglegOptimizer, IterateLineSearch) {
     DOUBLES_EQUAL(fg.error(config), result.f_error,
                   1e-5);  // Check that error is correctly filled in
   }
+}
+
+/* ************************************************************************* */
+// At the minimum of the linear model the Gauss-Newton step is zero, so there
+// is nothing to search: Iterate must return the zero step instead of reporting
+// an invalid configuration. A genuinely invalid configuration still throws.
+TEST(DoglegOptimizer, IterateLineSearchZeroGaussNewtonStep) {
+  NonlinearFactorGraph fg;
+  fg.addPrior(X(1), Point2(1.0, 2.0), noiseModel::Isotropic::Sigma(2, 0.1));
+  Values config;
+  config.insert(X(1), Point2(1.0, 2.0));  // already the minimum
+
+  auto gbn = fg.linearize(config)->eliminateSequential();
+  const VectorValues dx_u = gbn->optimizeGradientSearch();
+  const VectorValues dx_n = gbn->optimize();
+  DOUBLES_EQUAL(0.0, dx_n.norm(), 1e-12);
+
+  const DoglegOptimizerImpl::IterationResult result =
+      DoglegLineSearchImpl::Iterate({0.02, 0.5, 1.5, 1e-3, false}, dx_u, dx_n,
+                                    *gbn, fg, config);
+  DOUBLES_EQUAL(0.0, result.dx_d.norm(), 1e-12);
+  DOUBLES_EQUAL(fg.error(config), result.f_error, 1e-12);
+
+  // stepSize < 1 can never terminate the search: still a configuration error.
+  CHECK_EXCEPTION(DoglegLineSearchImpl::Iterate({0.02, 0.5, 0.5, 1e-3, false},
+                                                dx_u, dx_n, *gbn, fg, config),
+                  std::runtime_error);
 }
 
 /* ************************************************************************* */
@@ -305,8 +330,8 @@ TEST(DogLegOptimizer, VariableUpdate) {
 
   // Add a prior on pose x0. This indirectly specifies where the origin is.
   // 30cm std on x,y,z 0.1 rad on roll,pitch,yaw
-  noiseModel::Diagonal::shared_ptr noise = noiseModel::Diagonal::Sigmas(
-      (Vector(6) << Vector3::Constant(0.3), Vector3::Constant(0.1)).finished());
+  noiseModel::Diagonal::shared_ptr noise =
+      noiseModel::Diagonal::Sigmas(Vector{{0.3, 0.3, 0.3, 0.1, 0.1, 0.1}});
   graph.emplace_shared<PriorFactor<Pose3> >(0, poses[0], noise);
 
   // Because the structure-from-motion problem has a scale ambiguity, the

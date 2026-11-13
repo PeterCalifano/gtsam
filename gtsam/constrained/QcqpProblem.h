@@ -17,13 +17,214 @@
 
 #pragma once
 
+#include <gtsam/base/Manifold.h>
 #include <gtsam/constrained/ConstrainedOptProblem.h>
 #include <gtsam/constrained/LinearConstraint.h>
 #include <gtsam/constrained/QpCost.h>
 #include <gtsam/constrained/QuadraticConstraint.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 
+#include <stdexcept>
+#include <type_traits>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 namespace gtsam {
+
+/**
+ * Collect variable QCQP equalities once per key, in insertion order.
+ * Use separate collectors for ordinary and redundant variable constraints.
+ * Factor-specific constraints do not belong in either collector.
+ */
+class QcqpVariableConstraints {
+  std::unordered_set<Key> keys_;
+  NonlinearEqualityConstraints constraints_;
+
+ public:
+  /**
+   * Generate and append a variable's equalities only on its first visit.
+   * generateConstraints returns (A, a, b) triples for
+   * trace(X' A X) + 2 a' x = b. All providers for a key must agree on the set.
+   * An empty set still marks the key as visited.
+   */
+  template <typename Generator>
+  void add(Key key, Generator generateConstraints) {
+    if (!keys_.insert(key).second) return;
+    for (const auto& [A, a, b] : generateConstraints()) {
+      constraints_.push_back(
+          QuadraticConstraint::Equal(key, A, a, b).createEqualityFactor());
+    }
+  }
+
+  /// Return the collected variable constraints.
+  const NonlinearEqualityConstraints& constraints() const { return constraints_; }
+};
+
+/**
+ * Optional interface for factors with variables that have redundant QCQP
+ * equalities. Deriving from this interface opts a factor in and requires an
+ * appendRedundantConstraints override. Factors without this interface are
+ * skipped when collecting redundant constraints.
+ */
+class GTSAM_EXPORT RedundantQcqpProvider {
+ public:
+  virtual ~RedundantQcqpProvider() = default;
+
+  /**
+   * Add redundant equalities through the collector, once per variable key.
+   * All providers are assumed to supply the same set for a given key, so
+   * previously visited keys must be left untouched, even for empty sets.
+   * May add nothing for variable types or column dimensions without them.
+   */
+  virtual void appendRedundantConstraints(
+      size_t columnDimension, QcqpVariableConstraints& constraints) const = 0;
+};
+
+namespace internal {
+
+template <typename T, int D, typename = void>
+struct HasQcqpVariableTraits : std::false_type {};
+
+template <typename T, int D>
+struct HasQcqpVariableTraits<
+    T, D,
+    std::void_t<
+        decltype(traits<T>::template QcqpValue<D>(std::declval<T>())),
+        decltype(traits<T>::template QcqpConstraints<D>())>>
+    : std::true_type {};
+
+template <typename T, int D, typename = void>
+struct HasQcqpExtractionTraits : std::false_type {};
+
+template <typename T, int D>
+struct HasQcqpExtractionTraits<
+    T, D,
+    std::void_t<decltype(traits<T>::template FromQcqpValue<D>(
+        std::declval<const Matrix&>()))>> : HasQcqpVariableTraits<T, D> {};
+
+template <typename T, typename = void>
+struct HasQcqpVectorDim : std::false_type {};
+
+template <typename T>
+struct HasQcqpVectorDim<T, std::void_t<decltype(traits<T>::QcqpVectorDim)>>
+    : std::true_type {};
+
+}  // namespace internal
+
+/**
+ * Insert one matrix-valued QCQP variable using traits<T>::QcqpValue<D>.
+ *
+ * D is the number of columns in the matrix-valued QCQP variable. D=1 stores
+ * vector QCQPs as r-by-1 matrices; larger D values store matrix-valued QCQP
+ * variables without changing the row-space cost matrices.
+ */
+template <typename T, int D = 1>
+void insertQcqpValue(Key key, const T& value, Values* qcqpValues) {
+  static_assert(internal::HasQcqpVariableTraits<T, D>::value,
+                "insertQcqpValue requires traits<T>::QcqpValue<D> and "
+                "traits<T>::QcqpConstraints<D>.");
+  if (!qcqpValues) {
+    throw std::invalid_argument("insertQcqpValue: qcqpValues is null.");
+  }
+
+  const Matrix qcqpValue = traits<T>::template QcqpValue<D>(value);
+  if (qcqpValues->exists(key)) {
+    const Matrix existing = qcqpValues->at<Matrix>(key);
+    if (existing.rows() != qcqpValue.rows() ||
+        existing.cols() != qcqpValue.cols()) {
+      throw std::invalid_argument(
+          "insertQcqpValue: inconsistent QCQP variable dimensions.");
+    }
+    return;
+  }
+  qcqpValues->insert(key, qcqpValue);
+}
+
+/**
+ * Project QCQP variables back into typed values.
+ *
+ * D=1 accepts the exact vector dimension defined by T. D>1 accepts
+ * exact N-by-D matrix slices, where N is the intrinsic matrix row dimension
+ * of T. Selection is shape-only: types with identical lift dimensions (for
+ * example, compact Rot2 and Vector2 at D=1) cannot be distinguished in a
+ * mixed Values container; recover those variables using their known keys.
+ * Canonical lifts and solutions whose connected component has been
+ * explicitly gauge-aligned have meaningful absolute rotations. An unaligned
+ * D>1 component has a common right-O(D) gauge, so its independently extracted
+ * absolute rotations are intentionally best-effort and gauge-dependent.
+ */
+template <typename T, int D>
+std::vector<std::pair<Key, T>> extractQcqpValues(const Values& qcqpValues) {
+  static_assert(internal::HasQcqpExtractionTraits<T, D>::value,
+                "extractQcqpValues requires traits<T>::QcqpValue<D>, "
+                "QcqpConstraints<D>, and FromQcqpValue<D>.");
+  static_assert(D != 1 || internal::HasQcqpVectorDim<T>::value,
+                "extractQcqpValues<T, 1> requires "
+                "traits<T>::QcqpVectorDim.");
+  constexpr int expectedRows = [] {
+    if constexpr (D == 1) {
+      if constexpr (internal::HasQcqpVectorDim<T>::value) {
+        return traits<T>::QcqpVectorDim;
+      } else {
+        return Eigen::Dynamic;
+      }
+    } else {
+      return T::LieAlgebra::RowsAtCompileTime;
+    }
+  }();
+  std::vector<std::pair<Key, T>> out;
+  for (const auto& [key, M] : qcqpValues.extract<Matrix>()) {
+    if (M.rows() == expectedRows && M.cols() == D) {
+      out.emplace_back(key, traits<T>::template FromQcqpValue<D>(M));
+    }
+  }
+  return out;
+}
+
+/** Return the exact D=1 QCQP vector for a typed value. */
+template <typename T>
+Matrix qcqpValue(const T& typedValue) {
+  static_assert(internal::HasQcqpVariableTraits<T, 1>::value,
+                "qcqpValue requires traits<T>::QcqpValue<1> and "
+                "traits<T>::QcqpConstraints<1>.");
+  return traits<T>::template QcqpValue<1>(typedValue);
+}
+
+/** Insert a typed value as an exact D=1 QCQP matrix. */
+template <typename T>
+void insertQcqpValue(Key key, const T& typedValue, Values& qcqpValues) {
+  static_assert(internal::HasQcqpVariableTraits<T, 1>::value,
+                "insertQcqpValue requires traits<T>::QcqpValue<1> and "
+                "traits<T>::QcqpConstraints<1>.");
+  insertQcqpValue<T, 1>(key, typedValue, &qcqpValues);
+}
+
+/** Recover a typed value from an exact D=1 QCQP vector. */
+template <typename T>
+T fromQcqpValue(const Matrix& qcqpValue) {
+  static_assert(internal::HasQcqpExtractionTraits<T, 1>::value,
+                "fromQcqpValue requires traits<T>::QcqpValue<1>, "
+                "QcqpConstraints<1>, and FromQcqpValue<1>.");
+  static_assert(internal::HasQcqpVectorDim<T>::value,
+                "fromQcqpValue requires traits<T>::QcqpVectorDim.");
+  return traits<T>::template FromQcqpValue<1>(qcqpValue);
+}
+
+/** Extract all matching exact D=1 QCQP vectors as typed Values. */
+template <typename T>
+Values extractQcqpValues(const Values& qcqpValues) {
+  static_assert(internal::HasQcqpExtractionTraits<T, 1>::value,
+                "extractQcqpValues requires traits<T>::QcqpValue<1>, "
+                "QcqpConstraints<1>, and FromQcqpValue<1>.");
+  static_assert(internal::HasQcqpVectorDim<T>::value,
+                "extractQcqpValues requires traits<T>::QcqpVectorDim.");
+  Values typedValues;
+  for (const auto& [key, typedValue] : extractQcqpValues<T, 1>(qcqpValues)) {
+    typedValues.insert(key, typedValue);
+  }
+  return typedValues;
+}
 
 /**
  * Thin constrained optimization problem for QCQPs over Vector or Matrix values.
@@ -47,6 +248,20 @@ class GTSAM_EXPORT QcqpProblem : public ConstrainedOptProblem {
               const NonlinearEqualityConstraints& eqConstraints,
               const NonlinearInequalityConstraints& ineqConstraints)
       : Base(costs, eqConstraints, ineqConstraints) {}
+
+  /**
+   * Convert a supported nonlinear factor graph into QCQP costs/constraints.
+   *
+   * With useRedundantConstraints, the variables' redundant constraints, such
+   * as the eleven of Rot3 and Pose3 at columnDimension 1, are added to the
+   * equality constraints. They are implied by the manifold constraints, so
+   * they leave the feasible set unchanged, but the QCQP then violates LICQ,
+   * which local QCQP solvers may not handle. They tighten the SDP
+   * relaxations, which lift them like any other equality constraint.
+   */
+  explicit QcqpProblem(const NonlinearFactorGraph& graph,
+                       size_t columnDimension = 1,
+                       bool useRedundantConstraints = false);
 
   /** Add a quadratic cost. */
   void addCost(const QpCost& cost) { costs_.emplace_shared<QpCost>(cost); }

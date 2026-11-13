@@ -69,6 +69,55 @@ Tests complete!
 
 Coding for the GTSAM MATLAB toolbox is straightforward and very fast once you understand a few basic concepts! Please see the [manual](https://borglab.github.io/gtsam/) to get started.
 
+### MOSEK SDP solvers
+
+With `GTSAM_WITH_MOSEK=ON`, the toolbox includes `MosekMonolithicSDP` and
+`MosekChordalSDP`. Both use natural D=1 QCQP coordinates, with one constant
+entry per SDP block. The constructors no longer accept the
+`shareHomogeneousCoordinates` option:
+
+```matlab
+problem = gtsam.QcqpProblem(graph);
+solver = gtsam.MosekMonolithicSDP(problem);
+% Or: gtsam.MosekChordalSDP(problem, gtsam.ChordalOrderingType.Colamd)
+solver.solve();
+values = solver.qcqpValues();
+```
+
+Use the wrapped C++ map to set solver parameters:
+
+```matlab
+params = std.mapstringdouble();
+params.emplace('intpntCoTolRelGap', 1e-8);
+solver.solve(params);
+```
+
+A hard `FrobeniusPrior` fixes its variable: the SDP solvers substitute it out
+before lifting. `orderedKeys()`, `orderedKeyDims()`, and `variableEVRs()`
+describe only the free SDP variables; `qcqpValues()` also returns the fixed
+values after solving.
+
+`orderedKeyDims()` returns a wrapped map with `size()` and `at(key)` methods.
+`variableEVRs()` returns a wrapped vector with `size()` and zero-based `at(i)`
+access. The D=1 value dimensions are 2 for Rot2, 9 for Rot3, 6 for Pose2,
+and 12 for Pose3; the leading constant 1 is no longer part of these values.
+For example, the identity Rot2 is `[1; 0]`. Use `qcqpValueRot2`,
+`qcqpValueRot3`, `qcqpValuePose2`, or `qcqpValuePose3` to convert manifold
+values, and the corresponding `fromQcqpValue...` functions to recover them.
+The D>=2 matrix coordinates used by the Riemannian Staircase are unchanged.
+
+For an affine quadratic equality `x' * A * x + 2 * a' * x = b`, pass an
+explicit sigma: `gtsam.QuadraticConstraint.Equal(key, A, a, b, 1.0)`.
+MATLAB's four-argument `Equal(key, A, b, sigma)` form remains the purely
+quadratic equality. `QuadraticConstraint.FromPqr(key, P, q, r, sense)` converts
+`0.5 * x' * P * x + q' * x + r = 0` (or the chosen inequality sense) to the
+same convention.
+
+Running `test_gtsam` exercises the D=1 conversion and affine-constraint APIs
+without requiring MOSEK. When MOSEK is available, it also exercises both SDP
+formulations, both chordal orderings, solver parameter maps, unconstrained
+point costs, and a shifted-circle constraint with a linear term.
+
 
 ## Filename Case Sensitivity
 
@@ -88,7 +137,7 @@ cmake .. \
   -DGTSAM_INSTALL_MATLAB_TOOLBOX=ON \
   -DMatlab_ROOT_DIR=/Applications/MATLAB_R2025b.app \
   -DGTSAM_TOOLBOX_INSTALL_PATH=/path/to/gtsam/build/gtsam_toolbox
-cmake --build . -j6 --target gtsam_matlab_wrapper
+cmake --build . -j6 --target gtsam_matlab_wrapper CppUnitLite
 cmake --install .
 ```
 

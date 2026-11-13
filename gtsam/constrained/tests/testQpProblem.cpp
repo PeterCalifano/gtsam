@@ -58,10 +58,10 @@ double DirectTraceCost(const SymmetricBlockMatrix& Q, const Matrix& X0,
 
 // Verifies affine Hessian factors evaluate direct Vector values.
 TEST(QpCost, HessianVectorError) {
-  const Matrix G = (Matrix(2, 2) << 2.0, 0.5, 0.5, 3.0).finished();
-  const Vector g = (Vector(2) << 0.2, -0.3).finished();
+  const Matrix G{{2.0, 0.5}, {0.5, 3.0}};
+  const Vector2 g{0.2, -0.3};
   const QpCost cost(HessianFactor(x0, G, g, 1.7));
-  const Vector x = (Vector(2) << 1.0, 2.0).finished();
+  const Vector2 x{1.0, 2.0};
   const double expected = 0.5 * (1.7 - 2.0 * x.dot(g) + x.dot(G * x));
 
   EXPECT_DOUBLES_EQUAL(expected, cost.error(VectorValue(x)), 1e-12);
@@ -76,8 +76,8 @@ TEST(QpCost, RowSpaceMatrixError) {
 
   const SymmetricBlockMatrix blockQ(std::vector<DenseIndex>{2, 3}, Q);
   const QpCost cost(KeyVector{x0, x1}, blockQ, 2);
-  const Matrix X0 = (Matrix(2, 2) << 1.0, 2.0, -0.5, 0.25).finished();
-  const Matrix X1 = (Matrix(3, 2) << 0.2, -0.4, 1.5, 0.7, -1.0, 0.3).finished();
+  const Matrix X0{{1.0, 2.0}, {-0.5, 0.25}};
+  const Matrix X1{{0.2, -0.4}, {1.5, 0.7}, {-1.0, 0.3}};
 
   EXPECT_DOUBLES_EQUAL(DirectTraceCost(blockQ, X0, X1),
                        cost.error(MatrixValuesForTwoKeys(X0, X1)), 1e-12);
@@ -85,20 +85,36 @@ TEST(QpCost, RowSpaceMatrixError) {
 
 // Verifies QpCost linearizes exactly for direct Matrix values.
 TEST(QpCost, LinearizeExact) {
-  const Matrix G = (Matrix(2, 2) << 2.0, 0.5, 0.5, 3.0).finished();
-  const Vector g = (Vector(2) << 0.2, -0.3).finished();
+  const Matrix G{{2.0, 0.5}, {0.5, 3.0}};
+  const Vector g{{0.2, -0.3}};
   const QpCost cost(HessianFactor(x0, G, g, 1.7));
 
   Values linearizationPoint;
-  linearizationPoint.insert(x0, (Matrix(2, 1) << 1.5, 0.25).finished());
+  linearizationPoint.insert(x0, Matrix{{1.5}, {0.25}});
   Values perturbed;
-  perturbed.insert(x0, (Matrix(2, 1) << 1.2, 0.5).finished());
+  perturbed.insert(x0, Matrix{{1.2}, {0.5}});
 
   const LinearContainerFactor container(cost.linearize(linearizationPoint),
                                         linearizationPoint);
 
   EXPECT_DOUBLES_EQUAL(cost.error(perturbed), container.error(perturbed),
                        1e-12);
+}
+
+// Preserve the weak least-squares direction that normal equations erase.
+TEST(QpCost, SquareRootErrorAndLinearization) {
+  const Matrix A{{1e8, 1e8}, {1.0, 0.0}};
+  const JacobianFactor factor(x0, A, Vector2{0.0, 1.0});
+  const QpCost cost(factor);
+  const Values optimum = VectorValue(Vector2{1.0, -1.0});
+  CHECK(dynamic_cast<const JacobianFactor*>(&cost.gaussianFactor()));
+  EXPECT_DOUBLES_EQUAL(0.0, cost.error(optimum), 1e-15);
+  CHECK(cost.hessianFactor().error(VectorValues{{x0, Vector2{1., -1.}}}) < 0.0);
+  const auto shifted = cost.linearize(optimum);
+  CHECK(std::dynamic_pointer_cast<JacobianFactor>(shifted));
+  const LinearContainerFactor container(shifted, optimum);
+  const Values other = VectorValue(Vector2{2.0, -2.0});
+  EXPECT_DOUBLES_EQUAL(cost.error(other), container.error(other), 1e-12);
 }
 
 }  // namespace QpCostFixture
@@ -109,13 +125,13 @@ const Key x0 = Symbol('x', 0);
 
 Values VectorValue(double first, double second) {
   Values values;
-  values.insert(x0, (Vector(2) << first, second).finished());
+  values.insert(x0, Vector{{first, second}});
   return values;
 }
 
 // Verifies linear equalities evaluate direct Vector values.
 TEST(LinearConstraint, EqualityError) {
-  const Matrix A = (Matrix(1, 2) << 1.0, 2.0).finished();
+  const Matrix A{{1.0, 2.0}};
   const LinearConstraint constraint =
       LinearConstraint::Equal(JacobianFactor(x0, A, Vector1(5.0)));
   const auto factor = constraint.createEqualityFactor();
@@ -129,7 +145,7 @@ TEST(LinearConstraint, EqualityError) {
 
 // Verifies <= constraints ramp only positive signed violations.
 TEST(LinearConstraint, LessEqualViolation) {
-  const Matrix A = (Matrix(1, 2) << 1.0, 0.0).finished();
+  const Matrix12 A{{1.0, 0.0}};
   const LinearConstraint constraint =
       LinearConstraint::LessEqual(JacobianFactor(x0, A, Vector1(1.0)));
   const auto factor = constraint.createInequalityFactor();
@@ -144,7 +160,7 @@ TEST(LinearConstraint, LessEqualViolation) {
 
 // Verifies >= constraints are represented by negating the stored expression.
 TEST(LinearConstraint, GreaterEqualViolation) {
-  const Matrix A = (Matrix(1, 2) << 1.0, 0.0).finished();
+  const Matrix A{{1.0, 0.0}};
   const LinearConstraint constraint =
       LinearConstraint::GreaterEqual(JacobianFactor(x0, A, Vector1(1.0)));
   const auto factor = constraint.createInequalityFactor();
@@ -157,7 +173,7 @@ TEST(LinearConstraint, GreaterEqualViolation) {
 
 // Verifies dimension mismatches are rejected at evaluation time.
 TEST(LinearConstraint, DimensionMismatch) {
-  const Matrix A = (Matrix(1, 3) << 1.0, 2.0, 3.0).finished();
+  const Matrix A{{1.0, 2.0, 3.0}};
   const LinearConstraint constraint =
       LinearConstraint::Equal(JacobianFactor(x0, A, Vector1(0.0)));
   const auto factor = constraint.createEqualityFactor();
@@ -168,8 +184,8 @@ TEST(LinearConstraint, DimensionMismatch) {
 
 // Verifies non-Vector and non-Matrix Values entries are rejected.
 TEST(LinearConstraint, RejectNonVectorMatrix) {
-  const LinearConstraint constraint = LinearConstraint::Equal(
-      JacobianFactor(x0, (Matrix(1, 1) << 1.0).finished(), Vector1(0.0)));
+  const LinearConstraint constraint =
+      LinearConstraint::Equal(JacobianFactor(x0, Matrix{{1.0}}, Vector1(0.0)));
   const auto factor = constraint.createEqualityFactor();
   Values values;
   values.insertDouble(x0, 1.0);
@@ -185,13 +201,13 @@ const Key x0 = Symbol('x', 0);
 
 Values VectorValue(double first, double second) {
   Values values;
-  values.insert(x0, (Vector(2) << first, second).finished());
+  values.insert(x0, Vector{{first, second}});
   return values;
 }
 
 Values ScalarValue(double value) {
   Values values;
-  values.insert(x0, (Vector(1) << value).finished());
+  values.insert(x0, Vector{{value}});
   return values;
 }
 
@@ -199,18 +215,18 @@ Values ScalarValue(double value) {
 TEST(QpProblem, Evaluate) {
   QpProblem problem;
 
-  const Matrix G = (Matrix(2, 2) << 2.0, 0.5, 0.5, 3.0).finished();
-  const Vector g = (Vector(2) << 0.2, -0.3).finished();
+  const Matrix G{{2.0, 0.5}, {0.5, 3.0}};
+  const Vector2 g{0.2, -0.3};
   problem.addCost(HessianFactor(x0, G, g, 1.7));
 
   problem.addConstraint(LinearConstraint::Equal(
-      JacobianFactor(x0, (Matrix(1, 2) << 1.0, 2.0).finished(), Vector1(5.0))));
+      JacobianFactor(x0, Matrix{{1.0, 2.0}}, Vector1(5.0))));
   problem.addConstraint(LinearConstraint::LessEqual(
-      JacobianFactor(x0, (Matrix(1, 2) << 1.0, 0.0).finished(), Vector1(3.0))));
+      JacobianFactor(x0, Matrix{{1.0, 0.0}}, Vector1(3.0))));
 
   const Values values = VectorValue(1.0, 2.0);
   const auto [cost, eqViolation, ineqViolation] = problem.evaluate(values);
-  const Vector x = (Vector(2) << 1.0, 2.0).finished();
+  const Vector2 x{1.0, 2.0};
   const double expectedCost = 0.5 * (1.7 - 2.0 * x.dot(g) + x.dot(G * x));
 
   EXPECT_DOUBLES_EQUAL(expectedCost, cost, 1e-12);

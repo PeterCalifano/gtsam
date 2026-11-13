@@ -16,12 +16,23 @@
  * @date    Sep 2, 2010
  */
 
+#include <algorithm>
 #include <vector>
 #include <limits>
 #include <cassert>
 
 #include <gtsam/inference/Ordering.h>
+
+#ifdef GTSAM_USE_SYSTEM_CCOLAMD
+#include <ccolamd.h>
+#else
+// These macros must surround the bundled header to rename its declarations.
+// clang-format off
+#include <gtsam/inference/internal/CCOLAMDSymbols.h>
 #include <gtsam/3rdparty/CCOLAMD/Include/ccolamd.h>
+#include <gtsam/inference/internal/CCOLAMDSymbolsUndef.h>
+// clang-format on
+#endif
 
 #ifdef GTSAM_SUPPORT_NESTED_DISSECTION
 #include <metis.h>
@@ -30,6 +41,54 @@
 using namespace std;
 
 namespace gtsam {
+
+namespace {
+
+size_t ccolamdRecommended(int nonzeros, int rows, int columns) {
+#ifdef GTSAM_USE_SYSTEM_CCOLAMD
+  return ::ccolamd_recommended(nonzeros, rows, columns);
+#else
+  return ::gtsam_ccolamd_recommended(nonzeros, rows, columns);
+#endif
+}
+
+void ccolamdSetDefaults(double knobs[CCOLAMD_KNOBS]) {
+#ifdef GTSAM_USE_SYSTEM_CCOLAMD
+  ::ccolamd_set_defaults(knobs);
+#else
+  ::gtsam_ccolamd_set_defaults(knobs);
+#endif
+}
+
+int ccolamdOrder(int rows, int columns, int arrayLength, int rowIndices[],
+                 int columnPointers[], double knobs[CCOLAMD_KNOBS],
+                 int stats[CCOLAMD_STATS], int constraintSet[]) {
+#ifdef GTSAM_USE_SYSTEM_CCOLAMD
+  return ::ccolamd(rows, columns, arrayLength, rowIndices, columnPointers,
+                   knobs, stats, constraintSet);
+#else
+  return ::gtsam_ccolamd(rows, columns, arrayLength, rowIndices, columnPointers,
+                         knobs, stats, constraintSet);
+#endif
+}
+
+// CCOLAMD requires every constraint group in [0, columns), but it only rejects
+// groups above that range and writes out of bounds for a group equal to it.
+// Groups only order the variables, so their ranks give the same constraints.
+std::vector<int> groupRanks(const std::vector<int>& groups) {
+  std::vector<int> labels(groups);
+  std::sort(labels.begin(), labels.end());
+  labels.erase(std::unique(labels.begin(), labels.end()), labels.end());
+  std::vector<int> ranks(groups.size());
+  for (size_t j = 0; j < groups.size(); ++j) {
+    ranks[j] = static_cast<int>(
+        std::lower_bound(labels.begin(), labels.end(), groups[j]) -
+        labels.begin());
+  }
+  return ranks;
+}
+
+}  // namespace
 
 /* ************************************************************************* */
 FastMap<Key, size_t> Ordering::invert() const {
@@ -66,8 +125,9 @@ Ordering Ordering::ColamdConstrained(const VariableIndex& variableIndex,
   const size_t nEntries = variableIndex.nEntries(), nFactors =
       variableIndex.nFactors();
   // Convert to compressed column major format colamd wants it in (== MATLAB format!)
-  const size_t Alen = ccolamd_recommended((int) nEntries, (int) nFactors,
-      (int) nVars); /* colamd arg 3: size of the array A */
+  const size_t Alen = ccolamdRecommended(
+      static_cast<int>(nEntries), static_cast<int>(nFactors),
+      static_cast<int>(nVars)); /* colamd arg 3: size of the array A */
   vector<int> A = vector<int>(Alen); /* colamd arg 4: row indices of A, of size Alen */
   vector<int> p = vector<int>(nVars + 1); /* colamd arg 5: column pointers of A, of size n_col+1 */
 
@@ -76,7 +136,7 @@ Ordering Ordering::ColamdConstrained(const VariableIndex& variableIndex,
   int count = 0;
   KeyVector keys(nVars); // Array to store the keys in the order we add them so we can retrieve them in permuted order
   size_t index = 0;
-  for (auto key_factors: variableIndex) {
+  for (const auto& key_factors: variableIndex) {
     // Arrange factor indices into COLAMD format
     const FactorIndices& column = key_factors.second;
     for(size_t factorIndex: column) {
@@ -92,20 +152,33 @@ Ordering Ordering::ColamdConstrained(const VariableIndex& variableIndex,
 
   //double* knobs = nullptr; /* colamd arg 6: parameters (uses defaults if nullptr) */
   double knobs[CCOLAMD_KNOBS];
-  ccolamd_set_defaults(knobs);
+  ccolamdSetDefaults(knobs);
   knobs[CCOLAMD_DENSE_ROW] = -1;
   knobs[CCOLAMD_DENSE_COL] = -1;
 
-  int stats[CCOLAMD_STATS]; /* colamd arg 7: colamd output statistics and error codes */
+  /* colamd arg 7: colamd output statistics and error codes */
+  int stats[CCOLAMD_STATS];
 
   gttoc(Prepare);
+
+  // Groups may be any increasing labels, e.g. after ISAM2 keeps only the
+  // affected keys of the caller's constraints.
+  const auto [minGroup, maxGroup] =
+      std::minmax_element(cmember.begin(), cmember.end());
+  std::vector<int> ranks;
+  int* constraintSet = cmember.data();
+  if (*minGroup < 0 || *maxGroup >= static_cast<int>(nVars)) {
+    ranks = groupRanks(cmember);
+    constraintSet = ranks.data();
+  }
 
   // call colamd, result will be in p
   /* returns (1) if successful, (0) otherwise*/
   if (nVars > 0) {
     gttic(ccolamd);
-    int rv = ccolamd((int) nFactors, (int) nVars, (int) Alen, &A[0], &p[0],
-        knobs, stats, &cmember[0]);
+    int rv = ccolamdOrder(
+        static_cast<int>(nFactors), static_cast<int>(nVars),
+        static_cast<int>(Alen), &A[0], &p[0], knobs, stats, constraintSet);
     if (rv != 1) {
       throw runtime_error("ccolamd failed with return value " + to_string(rv));
     }
@@ -136,7 +209,7 @@ Ordering Ordering::ColamdConstrainedLast(const VariableIndex& variableIndex,
   // TODO(frank): think of a way to not build this
   FastMap<Key, size_t> keyIndices;
   size_t j = 0;
-  for (auto key_factors: variableIndex)
+  for (const auto& key_factors: variableIndex)
     keyIndices.insert(keyIndices.end(), make_pair(key_factors.first, j++));
 
   // If at least some variables are not constrained to be last, constrain the
@@ -163,7 +236,7 @@ Ordering Ordering::ColamdConstrainedFirst(const VariableIndex& variableIndex,
   // Build a mapping to look up sorted Key indices by Key
   FastMap<Key, size_t> keyIndices;
   size_t j = 0;
-  for (auto key_factors: variableIndex)
+  for (const auto& key_factors: variableIndex)
     keyIndices.insert(keyIndices.end(), make_pair(key_factors.first, j++));
 
   // If at least some variables are not constrained to be last, constrain the
@@ -194,13 +267,12 @@ Ordering Ordering::ColamdConstrained(const VariableIndex& variableIndex,
   // Build a mapping to look up sorted Key indices by Key
   FastMap<Key, size_t> keyIndices;
   size_t j = 0;
-  for (auto key_factors: variableIndex)
+  for (const auto& key_factors: variableIndex)
     keyIndices.insert(keyIndices.end(), make_pair(key_factors.first, j++));
 
   // Assign groups
   typedef FastMap<Key, int>::value_type key_group;
   for(const key_group& p: groups) {
-    // FIXME: check that no groups are skipped
     cmember[keyIndices.at(p.first)] = p.second;
   }
 
@@ -208,7 +280,7 @@ Ordering Ordering::ColamdConstrained(const VariableIndex& variableIndex,
 }
 
 /* ************************************************************************* */
-Ordering Ordering::Metis(const MetisIndex& met) {
+Ordering Ordering::Metis(const MetisIndex& met, int seed) {
 #ifdef GTSAM_SUPPORT_NESTED_DISSECTION
   gttic(Ordering_METIS);
 
@@ -225,18 +297,25 @@ Ordering Ordering::Metis(const MetisIndex& met) {
 
   vector<idx_t> xadj = met.xadj();
   vector<idx_t> adj = met.adj();
-  vector<idx_t> perm, iperm;
+  vector<idx_t> perm(size), iperm(size);
 
-  for (idx_t i = 0; i < size; i++) {
-    perm.push_back(0);
-    iperm.push_back(0);
+  Ordering result;
+  if (adj.empty()) {
+    result.reserve(size);
+    for (idx_t i = 0; i < size; ++i) result.push_back(met.intToKey(i));
+    return result;
   }
 
-  int outputError;
+  // METIS seeds its internal random generator from METIS_OPTION_SEED; when no
+  // options are given it falls back to 4321, so the default argument passes
+  // that same value and reproduces the historical ordering exactly.
+  idx_t options[METIS_NOPTIONS];
+  METIS_SetDefaultOptions(options);
+  options[METIS_OPTION_SEED] = seed;
 
-  outputError = METIS_NodeND(&size, &xadj[0], &adj[0], nullptr, nullptr, &perm[0],
-      &iperm[0]);
-  Ordering result;
+  const int outputError =
+      METIS_NodeND(&size, xadj.data(), adj.data(), nullptr, options,
+                   perm.data(), iperm.data());
 
   if (outputError != METIS_OK) {
     std::cout << "METIS failed during Nested Dissection ordering!\n";

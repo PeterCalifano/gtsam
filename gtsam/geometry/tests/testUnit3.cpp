@@ -20,6 +20,7 @@
 
 #include <CppUnitLite/TestHarness.h>
 #include <gtsam/base/Testable.h>
+#include <gtsam/base/VectorConstants.h>
 #include <gtsam/base/numericalDerivative.h>
 #include <gtsam/base/serializationTestHelpers.h>
 #include <gtsam/geometry/Rot3.h>
@@ -53,6 +54,26 @@ TEST(Unit3, point3) {
     EXPECT(assert_equal(p, s.point3(actualH), 1e-5));
     EXPECT(assert_equal(expectedH, actualH, 1e-5));
   }
+}
+
+//*******************************************************************************
+static Vector3 scaled_(const Unit3& p, const double& magnitude) {
+  return p.scaled(magnitude);
+}
+
+TEST(Unit3, scaled) {
+  const Unit3 d(1, 2, 3);
+  const double magnitude = 9.81;
+  Matrix32 actualH_d;
+  Matrix31 actualH_m;
+  const Vector3 actual = d.scaled(magnitude, actualH_d, actualH_m);
+  EXPECT(assert_equal(Vector3(magnitude * d.unitVector()), actual, 1e-9));
+  const Matrix expectedH_d =
+      numericalDerivative21<Vector3, Unit3, double>(scaled_, d, magnitude);
+  const Matrix expectedH_m =
+      numericalDerivative22<Vector3, Unit3, double>(scaled_, d, magnitude);
+  EXPECT(assert_equal(expectedH_d, Matrix(actualH_d), 1e-5));
+  EXPECT(assert_equal(expectedH_m, Matrix(actualH_m), 1e-5));
 }
 
 //*******************************************************************************
@@ -235,6 +256,30 @@ TEST(Unit3, Distance) {
   }
 }
 
+// Checks both chart derivatives, including coincident and nearly coincident rays.
+TEST(Unit3, LocalCoordinatesJacobians) {
+  const Unit3 origin(2, -3, 1);
+  for (const Vector2& tangent :
+       {Vector2(0, 0), Vector2(1e-7, -2e-7), Vector2(0.001, -0.002),
+        Vector2(0.8, -1.1), Vector2(2.8, 0.4)}) {
+    const Unit3 other = origin.retract(tangent);
+    Matrix2 H1, H2;
+    const Vector2 actual = traits<Unit3>::Local(origin, other, H1, H2);
+    EXPECT(assert_equal(origin.localCoordinates(other), actual, 1e-12));
+    const auto local = [](const Unit3& a, const Unit3& b) {
+      return a.localCoordinates(b);
+    };
+    EXPECT(assert_equal(numericalDerivative21<Vector2, Unit3, Unit3>(
+                            local, origin, other, 1e-6), H1, 1e-6));
+    EXPECT(assert_equal(numericalDerivative22<Vector2, Unit3, Unit3>(
+                            local, origin, other, 1e-6), H2, 1e-6));
+  }
+  const Unit3 antipode(-origin.unitVector());
+  EXPECT(assert_equal(Vector2(M_PI, 0), origin.localCoordinates(antipode)));
+  Matrix2 H;
+  CHECK_EXCEPTION(origin.localCoordinates(antipode, {}, H), std::domain_error);
+}
+
 //*******************************************************************************
 TEST(Unit3, LocalCoordinates0) {
   Unit3 p;
@@ -316,9 +361,9 @@ Vector6 BasisTest(const Unit3& p, OptionalJacobian<6, 2> H) {
 TEST(Unit3, basis) {
   Unit3 p(0.1, -0.2, 0.9);
 
-  Matrix expected(3, 2);
-  expected << 0.0, -0.994169047, 0.97618706, -0.0233922129, 0.216930458,
-      0.105264958;
+  Matrix32 expected{{0.0, -0.994169047},
+                    {0.97618706, -0.0233922129},
+                    {0.216930458, 0.105264958}};
 
   Matrix62 actualH;
   Matrix62 expectedH = numericalDerivative11<Vector6, Unit3>(
@@ -376,21 +421,26 @@ TEST(Unit3, Retract) {
 }
 
 //*******************************************************************************
-TEST (Unit3, JacobianRetract) {
-  Matrix22 H;
-  Unit3 p;
-  auto f = std::bind(&Unit3::retract, p, std::placeholders::_1, nullptr);
-  {
-    Vector2 v(-0.2, 0.1);
-    p.retract(v, H);
-    Matrix H_expected_numerical = numericalDerivative11(f, v);
-    EXPECT(assert_equal(H_expected_numerical, H, 1e-5));
-  }
-  {
-    Vector2 v(0, 0);
-    p.retract(v, H);
-    Matrix H_expected_numerical = numericalDerivative11(f, v);
-    EXPECT(assert_equal(H_expected_numerical, H, 1e-5));
+// Checks the value and Jacobian at zero, across the Taylor cutoff, and at
+// large steps.
+TEST(Unit3, JacobianRetract) {
+  const Vector2 direction = Vector2{-2.0, 1.0}.normalized();
+  for (const Unit3& p : {Unit3(), Unit3(2, -3, 1), Unit3(-1, 4, -2)}) {
+    const auto retract = [&p](const Vector2& v) { return p.retract(v); };
+    for (double radius : {0.0, 1e-16, 1e-12, 1e-8, 1e-6, 0.5e-4,
+                          1e-4, 2e-4, 0.1, 1.0, M_PI, 4.0}) {
+      const Vector2 v = radius * direction;
+      Matrix2 H;
+      const Unit3 actual = p.retract(v, H);
+      const Matrix2 expectedH = numericalDerivative11(retract, v);
+      EXPECT(assert_equal(expectedH, H, 1e-8));
+
+      // An independent construction rotates p around p x (B v).
+      const Vector3 axisAngle = p.unitVector().cross(p.basis() * v);
+      const Unit3 expected = Rot3::Expmap(axisAngle) * p;
+      EXPECT(assert_equal(expected, actual, 1e-12));
+      EXPECT(assert_equal(retract(v), actual, 1e-12));
+    }
   }
 }
 

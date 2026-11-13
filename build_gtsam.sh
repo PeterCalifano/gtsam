@@ -206,6 +206,8 @@ if [[ "$rebuild_only" == false ]]; then
     "-DGTSAM_INSTALL_MATLAB_TOOLBOX=$(bool_to_cmake "$matlab_wrap")"
     "-DGTSAM_WITH_TBB=$(bool_to_cmake "$use_tbb")"
     -DGTSAM_WITH_EIGEN_MKL=OFF
+    # Share the system Eigen with ROS, Pinocchio and downstream packages.
+    -DGTSAM_USE_SYSTEM_EIGEN=ON
     "-DGTSAM_UNSTABLE_BUILD_PYTHON=$(bool_to_cmake "$python_wrap")"
     "-DGTSAM_TANGENT_PREINTEGRATION=$(bool_to_cmake "$use_tangent_preintegr")"
     "-DGTSAM_POSE3_EXPMAP=$(bool_to_cmake "$use_expmap")"

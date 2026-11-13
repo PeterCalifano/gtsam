@@ -62,6 +62,12 @@ NonlinearMultifrontalSolver::NonlinearMultifrontalSolver(
       dampingParams_(dampingParams) {}
 
 /* ************************************************************************* */
+NonlinearMultifrontalSolver::NonlinearMultifrontalSolver(
+    const GaussianFactorGraph& graph, const Ordering& ordering,
+    MultifrontalSolver::Parameters params, DampingParams dampingParams)
+    : MultifrontalSolver(graph, ordering, params), dampingParams_(dampingParams) {}
+
+/* ************************************************************************* */
 MultifrontalSolver::PrecomputedData NonlinearMultifrontalSolver::Precompute(
     const NonlinearFactorGraph& graph, const Values& values,
     const Ordering& ordering) {
@@ -117,7 +123,8 @@ void NonlinearMultifrontalSolver::eliminateInPlace(double lambda) {
         [this, lambda](MultifrontalClique& node) {
           node.eliminateInPlace(lambda, dampingParams_, exactHessianDiagonal_);
         },
-        params_.eliminationParallelThreshold);
+        params_.eliminationParallelThreshold,
+        params_.leafAggregationProblemSize);
   }
   eliminated_ = true;
 }
@@ -130,6 +137,8 @@ void NonlinearMultifrontalSolver::eliminateInPlace(
     MultifrontalSolver::eliminateInPlace(graph);
     return;
   }
+
+  prepareLoad(graph);
 
   // Calculate the exact Hessian diagonal if needed.
   if (dampingParams_.diagonalDamping && dampingParams_.exactHessianDiagonal) {
@@ -146,7 +155,8 @@ void NonlinearMultifrontalSolver::eliminateInPlace(
         node.fillAb(graph);
         node.eliminateInPlace(lambda, dampingParams_, exactHessianDiagonal_);
       },
-      params_.eliminationParallelThreshold);
+      params_.eliminationParallelThreshold,
+      params_.leafAggregationProblemSize);
   loaded_ = true;
   eliminated_ = true;
 }

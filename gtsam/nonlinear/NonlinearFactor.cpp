@@ -34,6 +34,15 @@ double NonlinearFactor::error(const HybridValues& c) const {
 }
 
 /* ************************************************************************* */
+void NonlinearFactor::qcqpFactors(
+    NonlinearFactorGraph& /*costs*/,
+    NonlinearEqualityConstraints& /*constraints*/,
+    QcqpVariableConstraints& /*variableConstraints*/,
+    size_t /*columnDimension*/) const {
+  throw std::runtime_error("NonlinearFactor::qcqpFactors is not implemented");
+}
+
+/* ************************************************************************* */
 void NonlinearFactor::print(const std::string& s,
     const KeyFormatter& keyFormatter) const {
   std::cout << s << "  keys = { ";
@@ -140,7 +149,7 @@ double NoiseModelFactor::error(const Values& c) const {
     const Vector b = unwhitenedError(c);
     check(noiseModel_, b.size());
     if (noiseModel_)
-      return noiseModel_->loss(noiseModel_->squaredMahalanobisDistance(b));
+      return noiseModel_->loss(b);
     else
       return 0.5 * b.squaredNorm();
   } else {

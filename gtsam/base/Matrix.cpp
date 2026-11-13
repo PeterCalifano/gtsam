@@ -26,10 +26,8 @@
 #include <cstdarg>
 #include <cassert>
 #include <cstring>
-#include <iomanip>
 #include <list>
 #include <fstream>
-#include <limits>
 #include <iostream>
 #include <iterator>
 
@@ -90,7 +88,7 @@ static bool is_linear_dependent(const Matrix& A, const Matrix& B, double tol) {
   if(m1!=m2 || n1!=n2) dependent = false;
 
   for(size_t i=0; dependent && i<m1; i++) {
-    if (!gtsam::linear_dependent(Vector(row(A,i)), Vector(row(B,i)), tol))
+    if (!gtsam::linear_dependent(Vector(A.row(i)), Vector(B.row(i)), tol))
       dependent = false;
   }
 
@@ -202,13 +200,14 @@ Matrix diag(const std::vector<Matrix>& Hs) {
   Matrix results = Matrix::Zero(rows,cols);
   size_t r = 0, c = 0;
   for (size_t i = 0; i<Hs.size(); ++i) {
-    insertSub(results, Hs[i], r, c);
+    results.block(r, c, Hs[i].rows(), Hs[i].cols()) = Hs[i];
     r+=Hs[i].rows();
     c+=Hs[i].cols();
   }
   return results;
 }
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /* ************************************************************************* */
 Vector columnNormSquare(const Matrix &A) {
   Vector v (A.cols()) ;
@@ -217,6 +216,7 @@ Vector columnNormSquare(const Matrix &A) {
   }
   return v ;
 }
+#endif
 
 /* ************************************************************************* */
 /** Householder QR factorization, Golub & Van Loan p 224, explicit version    */
@@ -274,7 +274,7 @@ weighted_eliminate(Matrix& A, Vector& b, const Vector& sigmas) {
   // Then update A and b by substituting x with d-rS, zero-ing out x's column.
   for (size_t j=0; j<n; ++j) {
     // extract the first column of A
-    Vector a(column(A, j));
+    Vector a(A.col(j));
 
     // Calculate weighted pseudo-inverse and corresponding precision
     double precision = weightedPseudoinverse(a, weights, pseudo);
@@ -351,6 +351,7 @@ void householder(Matrix& A, size_t k) {
 //  gttoc(householder_zero_fill);
 }
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /* ************************************************************************* */
 Vector backSubstituteLower(const Matrix& L, const Vector& b, bool unit) {
   // @return the solution x of L*x=b
@@ -380,7 +381,9 @@ Vector backSubstituteUpper(const Vector& b, const Matrix& U, bool unit) {
   else
     return U.triangularView<Eigen::Upper>().transpose().solve<Eigen::OnTheLeft>(b);
 }
+#endif
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /* ************************************************************************* */
 Matrix stack(size_t nrMatrices, ...)
 {
@@ -407,6 +410,7 @@ Matrix stack(size_t nrMatrices, ...)
 
   return A;
 }
+#endif
 
 /* ************************************************************************* */
 Matrix stack(const std::vector<Matrix>& blocks) {
@@ -452,6 +456,7 @@ Matrix collect(const std::vector<const Matrix *>& matrices, size_t m, size_t n)
   return A;
 }
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /* ************************************************************************* */
 Matrix collect(size_t nrMatrices, ...)
 {
@@ -462,9 +467,12 @@ Matrix collect(size_t nrMatrices, ...)
     Matrix *M = va_arg(ap, Matrix *);
     matrices.push_back(M);
   }
+  va_end(ap);
   return collect(matrices);
 }
+#endif
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /* ************************************************************************* */
 // row scaling, in-place
 void vector_scale_inplace(const Vector& v, Matrix& A, bool inf_mask) {
@@ -531,6 +539,7 @@ Matrix cholesky_inverse(const Matrix &A)
   llt.matrixU().solveInPlace<Eigen::OnTheRight>(inv);
   return inv*inv.transpose();
 }
+#endif
 
 /* ************************************************************************* */
 // Semantics:
@@ -570,7 +579,8 @@ std::tuple<int, double, Vector> DLT(const Matrix& A, double rank_tol) {
 
   // Return rank, error, and corresponding column of V
   double error = m<p ? 0 : s(m-1);
-  return std::tuple<int, double, Vector>((int)rank, error, Vector(column(V, p-1)));
+  return std::tuple<int, double, Vector>((int)rank, error,
+                                         Vector(V.col(p - 1)));
 }
 
 /* ************************************************************************* */

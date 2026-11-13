@@ -13,16 +13,45 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
 #include <pybind11/iostream.h>
+#include "python/gtsam/optional_jacobian_pybind.h"
 #include "gtsam/base/serialization.h"
 #include "gtsam/base/utilities.h"  // for RedirectCout.
+#include "python/gtsam/noise_model_serialization.h"
 
 // These are the included headers listed in `gtsam_unstable.i`
 {includes}
 #if GTSAM_ENABLE_BOOST_SERIALIZATION
 #include <boost/serialization/export.hpp>
+#include <gtsam/linear/NoiseModel.h>
 #endif
 
 {boost_class_export}
+
+#if GTSAM_ENABLE_BOOST_SERIALIZATION
+// Instantiate exports for the noise models serialized by unstable factors.
+// Keep these dependencies synchronized with the serializable noise models in
+// gtsam/linear/linear.i so unstable factors can serialize their polymorphic
+// SharedNoiseModel members.
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::Gaussian)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::Diagonal)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::Constrained)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::Isotropic)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::Unit)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::Robust)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::Null)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::Fair)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::Huber)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::Cauchy)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::Tukey)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::Welsch)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::GemanMcClure)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::TruncatedLeastSquares)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::DCS)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::L2WithDeadZone)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::AsymmetricTukey)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::AsymmetricCauchy)
+BOOST_CLASS_EXPORT_IMPLEMENT(gtsam::noiseModel::mEstimator::Custom)
+#endif
 
 #include "python/gtsam_unstable/preamble.h"
 
@@ -30,14 +59,24 @@ using namespace std;
 
 namespace py = pybind11;
 
-PYBIND11_MODULE({module_name}, m_) {{
+{submodules}
+
+{declaration_module_def} {{
+{wrapped_declarations}
+}}
+
+{binding_module_def} {{
+{wrapped_bindings}
+
+#include "python/gtsam_unstable/specializations/gtsam_unstable.h"
+}}
+
+{module_def} {{
     m_.doc() = "pybind11 wrapper of {module_name}";
 
     // Note here we need to import the dependent library
     py::module::import("gtsam");
 
-{wrapped_namespace}
-
-#include "python/gtsam_unstable/specializations/gtsam_unstable.h"
+{module_init}
 
 }}

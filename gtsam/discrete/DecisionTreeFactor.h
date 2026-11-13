@@ -23,10 +23,7 @@
 #include <gtsam/discrete/DiscreteKey.h>
 #include <gtsam/discrete/Ring.h>
 
-#include <algorithm>
-#include <map>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -174,6 +171,9 @@ namespace gtsam {
       return apply(f, Ring::mul);
     }
 
+    /// Multiply with a conditional, e.g., to apply Bayes' rule.
+    DecisionTreeFactor operator*(const DiscreteConditional& c) const;
+
     static double safe_div(const double& a, const double& b);
 
     /**
@@ -195,6 +195,9 @@ namespace gtsam {
 
     /// Convert into a decision tree
     DecisionTreeFactor toDecisionTreeFactor() const override { return *this; }
+
+    /// Convert directly into a sparse table.
+    TableFactor toTableFactor() const override;
 
     /// Use sum() from AlgebraicDecisionTree
     using ADT::sum;
@@ -266,20 +269,19 @@ namespace gtsam {
      */
     shared_ptr combine(const Ordering& keys, Binary op) const;
 
-    /// Enumerate all values into a map from values to double.
-    std::vector<std::pair<DiscreteValues, double>> enumerate() const;
-
     /// Get all the probabilities in order of assignment values
     std::vector<double> probabilities() const;
 
     /**
-     * @brief Compute the probability value which is the threshold above which
-     * only `N` leaves are present.
+     * @brief Compute the `N`-th largest value over all assignments, counting
+     * duplicates.
      *
-     * This is used for pruning out the smaller probabilities.
+     * This is the threshold used by prune(). A leaf counts once for every
+     * assignment it covers, including assignments of keys the tree no longer
+     * branches on after compression. Returns 0 when the factor has fewer than
+     * `N` assignments, and infinity when `N` is 0.
      *
-     * @param N The number of leaves to keep post pruning.
-     * @return double
+     * @param N The number of assignments to keep post pruning.
      */
     double computeThreshold(const size_t N) const;
 
@@ -287,21 +289,20 @@ namespace gtsam {
      * @brief Prune the decision tree of discrete variables.
      *
      * Pruning will set the leaves to be "pruned" to 0 indicating a 0
-     * probability. An assignment is pruned if it is not in the top
-     * `maxNrAssignments` values.
+     * probability. An assignment is pruned if its value is smaller than the
+     * `maxNrAssignments`-th largest value, counting duplicates.
      *
-     * A violation can occur if there are more
-     * duplicate values than `maxNrAssignments`. A violation here is the need to
-     * un-prune the decision tree (e.g. all assignment values are 1.0). We could
-     * have another case where some subset of duplicates exist (e.g. for a tree
-     * with 8 assignments we have 1, 1, 1, 1, 0.8, 0.7, 0.6, 0.5), but this is
-     * not a violation since the for `maxNrAssignments=5` the top values are (1,
-     * 0.8).
+     * Every assignment tied with that value is kept, so more than
+     * `maxNrAssignments` assignments survive when ties straddle the cutoff.
+     * For example, pruning (0.2, 0.2, 0.1, 0.2, 0.3) to 3 assignments gives
+     * (0.2, 0.2, 0, 0.2, 0.3), and a factor whose values are all equal is not
+     * pruned at all.
      *
      * @param maxNrAssignments The maximum number of assignments to keep.
-     * @return DecisionTreeFactor
+     * @return The pruned DecisionTreeFactor.
      */
-    DecisionTreeFactor prune(size_t maxNrAssignments) const;
+    [[nodiscard]] DiscreteFactor::shared_ptr prune(
+        size_t maxNrAssignments) const override;
 
     /**
      * Get the number of non-zero values contained in this factor.

@@ -18,10 +18,12 @@
  */
 
 #include <gtsam/base/cholesky.h>
+#include <gtsam/base/CholeskyCheck.h>
 #include <gtsam/base/timing.h>
 
-#include <cmath>
+#include <Eigen/Cholesky>
 #include <cassert>
+#include <cmath>
 
 using namespace std;
 
@@ -30,8 +32,6 @@ namespace gtsam {
 static const double negativePivotThreshold = -1e-1;
 static const double zeroPivotThreshold = 1e-6;
 static const double underconstrainedPrior = 1e-5;
-static const int underconstrainedExponentDifference = 12;
-
 /* ************************************************************************* */
 static inline int choleskyStep(Matrix& ATA, size_t k, size_t order) {
   // Get pivot value
@@ -120,14 +120,26 @@ bool choleskyPartial(Matrix& ABC, size_t nFrontal, size_t topleft) {
   auto B = ABC.block(topleft, topleft + nFrontal, nFrontal, n - nFrontal);
   auto C = ABC.block(topleft + nFrontal, topleft + nFrontal, n - nFrontal, n - nFrontal);
 
-  // Compute Cholesky factorization A = R'*R, overwrites A.
+  // Compute Cholesky factorization A = R'*R.
   gttic(LLT);
+  if (!A.diagonal().allFinite() || (A.diagonal().array() <= 0.0).any()) {
+    return false;
+  }
   Eigen::LLT<Matrix, Eigen::Upper> llt(A);
   Eigen::ComputationInfo lltResult = llt.info();
-  if (lltResult != Eigen::Success)
+  if (lltResult != Eigen::Success) {
     return false;
+  }
+  const auto upperFactor = llt.matrixU();
+  for (DenseIndex index = 0; index < upperFactor.rows(); ++index) {
+    const double pivot = upperFactor(index, index);
+    if (!internal::CholeskyCheck::accept(
+            pivot, A(index, index))) {
+      return false;
+    }
+  }
   auto R = A.triangularView<Eigen::Upper>();
-  R = llt.matrixU();
+  R = upperFactor;
   gttoc(LLT);
 
   // Compute S = inv(R') * B
@@ -142,19 +154,6 @@ bool choleskyPartial(Matrix& ABC, size_t nFrontal, size_t topleft) {
     C.selfadjointView<Eigen::Upper>().rankUpdate(B.transpose(), -1.0);
   gttoc(compute_L);
 
-  // Check last diagonal element - Eigen does not check it
-  if (nFrontal >= 2) {
-    int exp2, exp1;
-    // NOTE(gareth): R is already the size of A, so we don't need to add topleft here.
-    (void)frexp(R(nFrontal - 2, nFrontal - 2), &exp2);
-    (void)frexp(R(nFrontal - 1, nFrontal - 1), &exp1);
-    return (exp2 - exp1 < underconstrainedExponentDifference);
-  } else if (nFrontal == 1) {
-    int exp1;
-    (void)frexp(R(0, 0), &exp1);
-    return (exp1 > -underconstrainedExponentDifference);
-  } else {
-    return true;
-  }
+  return true;
 }
 }  // namespace gtsam

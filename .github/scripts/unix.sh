@@ -19,9 +19,11 @@ function configure()
   # CMAKE_CXX_FLAGS="-w": Suppress warnings to avoid IO latency in CI logs
   cmake $GITHUB_WORKSPACE \
       -B build -G Ninja \
+      -DGTSAM_BUILD_WITH_WERROR=ON \
       -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Debug} \
       -DCMAKE_CXX_FLAGS="-w" \
       -DGTSAM_BUILD_TESTS=${GTSAM_BUILD_TESTS:-OFF} \
+      -DGTSAM_SLOW_BUT_CORRECT_BETWEENFACTOR=ON \
       -DGTSAM_BUILD_UNSTABLE=${GTSAM_BUILD_UNSTABLE:-ON} \
       -DGTSAM_WITH_TBB=${GTSAM_WITH_TBB:-OFF} \
       -DGTSAM_BUILD_EXAMPLES_ALWAYS=${GTSAM_BUILD_EXAMPLES_ALWAYS:-OFF} \
@@ -76,15 +78,20 @@ function test ()
 
   configure
 
+  build_targets=(check)
+  if [ "${GTSAM_BUILD_EXAMPLES_ALWAYS:-OFF}" == "ON" ]; then
+    build_targets+=(examples)
+  fi
+
   # Actual testing
   if [ "$(uname)" == "Linux" ]; then
     if (($(nproc) > 2)); then
-      cmake --build build -j$(nproc) --target check
+      cmake --build build -j$(nproc) --target "${build_targets[@]}"
     else
-      cmake --build build -j2 --target check
+      cmake --build build -j2 --target "${build_targets[@]}"
     fi
   elif [ "$(uname)" == "Darwin" ]; then
-    cmake --build build -j$(sysctl -n hw.physicalcpu) --target check
+    cmake --build build -j$(sysctl -n hw.physicalcpu) --target "${build_targets[@]}"
   fi
 
   finish

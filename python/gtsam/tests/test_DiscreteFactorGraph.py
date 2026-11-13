@@ -15,7 +15,9 @@ import unittest
 
 import numpy as np
 from gtsam.utils.test_case import GtsamTestCase
-from dfg_utils import make_key, generate_transition_cpt, generate_observation_cpt
+from gtsam.tests.dfg_utils import (
+    make_key, generate_transition_cpt, generate_observation_cpt,
+)
 
 from gtsam import (
     DecisionTreeFactor,
@@ -250,7 +252,7 @@ class TestChains(GtsamTestCase):
         last_marginal = sum_product.at(chain_length - 1)
 
         # Ensure marginal probabilities are close to the stationary distribution
-        self.gtsamAssertEquals(expected, last_marginal)
+        self.gtsamAssertEquals(expected, last_marginal.toDecisionTreeFactor())
 
 
 if __name__ == "__main__":

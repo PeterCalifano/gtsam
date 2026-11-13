@@ -20,6 +20,7 @@
 
 #include <gtsam/base/Manifold.h>
 #include <gtsam/base/Matrix.h>
+#include <gtsam/base/MatrixConstants.h>
 #include <gtsam/base/Testable.h>
 #include <gtsam/base/std_optional_serialization.h>
 #include <gtsam/dllexport.h>
@@ -104,9 +105,19 @@ namespace gtsam {
         return std::sqrt(squaredMahalanobisDistance(v));
       }
 
-      /// loss function, input is Mahalanobis distance
+      /// Loss function, input is squared Mahalanobis distance.
       virtual double loss(const double squared_distance) const {
         return 0.5 * squared_distance;
+      }
+
+      /**
+       * Evaluate the loss of an unwhitened residual v. Unlike the
+       * squared-distance overload, this retains the individual components
+       * and their signs for scalar robust losses.
+       * The default delegates to the squared-distance loss.
+       */
+      virtual double loss(const Vector& v) const {
+        return loss(squaredMahalanobisDistance(v));
       }
 
       virtual void WhitenSystem(std::vector<Matrix>& A, Vector& b) const = 0;
@@ -266,9 +277,14 @@ namespace gtsam {
       /**
        * Apply appropriately weighted QR factorization to the system [A b]
        *               Q'  *   [A b]  =  [R d]
-       * Dimensions: (r*m) * m*(n+1) = r*(n+1), where r = min(m,n).
+       * Dimensions: (r*m) * m*(n+1) = r*(n+1), where r <= min(m,n).
        * This routine performs an in-place factorization on Ab.
        * Below-diagonal elements are set to zero by this routine.
+       * Exact rows take priority in the original variable order. Finite pivots
+       * use a weighted, scale-aware rank test, including weak observations.
+       * All front sizes use Eigen QR with a row-pivoted, one-column
+       * Householder fallback. Elimination preserves square-root form without
+       * forming normal equations.
        * @param Ab is the m*(n+1) augmented system matrix [A b]
        * @return Empty SharedDiagonal() noise model: R,d are whitened
        */
@@ -717,8 +733,11 @@ namespace gtsam {
      *  Taking as an example noise = Isotropic::Create(d, sigma),  we first divide the residuals
      *  uw = |Ax-b| by sigma by "whitening" the system (A,b), obtaining r = |Ax-b|/sigma, and
      *  then we pass the now whitened residual 'r' through the robust M-estimator.
-     *  This is currently done by multiplying with sqrt(w), because the residuals will be squared
-     *  again in error, yielding 0.5 \sum w(r)*r^2.
+     *  Linearization multiplies by sqrt(w), with weights evaluated at the
+     *  linear-system right-hand side. The resulting Gaussian factor evaluates
+     *  a quadratic approximation, 0.5 \sum w(r)*r^2, with those weights held
+     *  fixed. Nonlinear factor error() instead evaluates the robust objective
+     *  via loss(v); it is generally not the squared norm of whiten(v).
      *
      *  In other words, while sigma is expressed in the native residual units, a parameter like
      *  k in the Huber norm is expressed in whitened units, i.e., "nr of sigmas".
@@ -763,10 +782,21 @@ namespace gtsam {
       inline Vector unwhiten(const Vector& /*v*/) const override
       { throw std::invalid_argument("unwhiten is not currently supported for robust noise models."); }
       inline void whitenInPlace(Vector& v) const override { this->WhitenSystem(v); }
-      /// Compute loss from the m-estimator using the Mahalanobis distance.
+      /**
+       * Compute the block loss from a squared Mahalanobis distance. Use the
+       * vector overload to respect Scalar reweighting and residual signs.
+       */
       double loss(const double squared_distance) const override {
         return robust_->loss(std::sqrt(squared_distance));
       }
+
+      /**
+       * Evaluate the loss of an unwhitened residual v. Scalar mode sums
+       * m-estimator losses at the negated whitened components, matching the
+       * existing reweighting of the linear-system right-hand side -v.
+       * Block mode evaluates the loss of the Mahalanobis distance.
+       */
+      double loss(const Vector& v) const override;
 
       // NOTE: This is special because in whiten the base version will do the re-weighting
       // which is incorrect!

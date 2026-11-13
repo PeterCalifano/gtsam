@@ -20,6 +20,7 @@
  */
 
 #include <gtsam/base/Matrix.h>
+#include <gtsam/base/MatrixConstants.h>
 #include <gtsam/geometry/Cal3_S2.h>
 #include <gtsam/geometry/PinholeCamera.h>
 #include <gtsam/geometry/Pose3.h>
@@ -52,7 +53,6 @@ int main(int argc, char* argv[]) {
   params->setAccelerometerCovariance(I_3x3 * 0.1);
   params->setGyroscopeCovariance(I_3x3 * 0.1);
   params->setIntegrationCovariance(I_3x3 * 0.1);
-  params->setUse2ndOrderCoriolis(false);
   params->setOmegaCoriolis(Vector3::Zero());
   
   // True biases used to corrupt measurements in ScenarioRunner

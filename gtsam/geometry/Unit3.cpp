@@ -25,6 +25,7 @@
 
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <cmath>
 #include <vector>
 
@@ -46,8 +47,7 @@ Unit3 Unit3::FromPoint3(const Point3& point, OptionalJacobian<2, 3> H) {
   Matrix3 D_p_point;
   Unit3 direction;
   direction.p_ = normalize(point, H ? &D_p_point : 0);
-  if (H)
-    *H << direction.basis().transpose() * D_p_point;
+  if (H) *H = direction.basis().transpose() * D_p_point;
   return direction;
 }
 
@@ -155,6 +155,16 @@ Vector3 Unit3::unitVector(OptionalJacobian<3, 2> H) const {
 }
 
 /* ************************************************************************* */
+Vector3 Unit3::scaled(double magnitude, OptionalJacobian<3, 2> H_this,
+                      OptionalJacobian<3, 1> H_magnitude) const {
+  if (H_this)
+    *H_this = magnitude * basis();
+  if (H_magnitude)
+    *H_magnitude = p_;
+  return magnitude * p_;
+}
+
+/* ************************************************************************* */
 std::ostream& operator<<(std::ostream& os, const Unit3& pair) {
   os << pair.p_ << endl;
   return os;
@@ -173,8 +183,8 @@ Unit3 Unit3::cross(const Unit3& q, OptionalJacobian<2, 2> H1,
                    OptionalJacobian<2, 2> H2) const {
   Matrix23 H;
   const auto result = Unit3::FromPoint3(gtsam::cross(p_, q.p_), H);
-  if (H1) *H1 << -H * q.skew() * basis();
-  if (H2) *H2 << H * skew() * q.basis();
+  if (H1) *H1 = -H * q.skew() * basis();
+  if (H2) *H2 = H * skew() * q.basis();
   return result;
 }
 
@@ -218,11 +228,11 @@ double Unit3::dot(const Unit3& q, OptionalJacobian<1, 2> H_p,
   double d = gtsam::dot(pn, qn, H_p ? &H_dot_pn : nullptr, H_q ? &H_dot_qn : nullptr);
 
   if (H_p) {
-    (*H_p) << H_dot_pn * H_pn_p;
+    *H_p = H_dot_pn * H_pn_p;
   }
 
   if (H_q) {
-    (*H_q) = H_dot_qn * H_qn_q;
+    *H_q = H_dot_qn * H_qn_q;
   }
 
   return d;
@@ -269,54 +279,73 @@ double Unit3::distance(const Unit3& q, OptionalJacobian<1, 2> H) const {
 }
 
 /* ************************************************************************* */
-Unit3 Unit3::retract(const Vector2& v, OptionalJacobian<2,2> H) const {
-  // Compute the 3D xi_hat vector
-  const Vector3 xi_hat = basis() * v;
-  const double theta = xi_hat.norm();
-  const double c = std::cos(theta);
+Unit3 Unit3::retract(const Vector2& v, OptionalJacobian<2, 2> H) const {
+  const Matrix32& B = basis();
+  const Vector3 tangent = B * v;
+  // The tangent basis is orthonormal, so ||B v|| = ||v||.
+  const double thetaSquared = v.squaredNorm();
+  const double theta = std::sqrt(thetaSquared);
+  const double cosine = std::cos(theta);
+  // Taylor series avoid division by zero and cancellation near zero.
+  const bool nearZero = thetaSquared < 1e-8;
+  const double sinc =
+      nearZero ? 1.0 + thetaSquared * (-1.0 / 6.0 + thetaSquared / 120.0)
+               : std::sin(theta) / theta;
 
-  // Treat case of very small v differently.
   Matrix23 H_from_point;
-  if (theta < std::numeric_limits<double>::epsilon()) {
-    const Unit3 exp_p_xi_hat = Unit3::FromPoint3(c * p_ + xi_hat,
-                                                 H? &H_from_point : nullptr);
-    if (H) { // Jacobian
-      *H = H_from_point *
-          (-p_ * xi_hat.transpose() + Matrix33::Identity()) * basis();
-    }
-    return exp_p_xi_hat;
+  const Unit3 result = Unit3::FromPoint3(cosine * p_ + sinc * tangent,
+                                         H ? &H_from_point : nullptr);
+  if (H) {
+    // (cos(theta) - sinc(theta)) / theta^2 tends to -1/3 at zero.
+    const double radialScale =
+        nearZero
+            ? -1.0 / 3.0 + thetaSquared * (1.0 / 30.0 - thetaSquared / 840.0)
+            : (cosine - sinc) / thetaSquared;
+    // Differentiate directly in the 2D tangent coordinates, using B^T B = I.
+    const Vector3 radial = -sinc * p_ + radialScale * tangent;
+    Matrix32 derivative = sinc * B;
+    derivative += radial * v.transpose();
+    *H = H_from_point * derivative;
   }
-
-  const double st = std::sin(theta) / theta;
-  const Unit3 exp_p_xi_hat = Unit3::FromPoint3(c * p_ + xi_hat * st,
-                                               H? &H_from_point : nullptr);
-  if (H) { // Jacobian
-    *H = H_from_point *
-        (p_ * -st * xi_hat.transpose() + st * Matrix33::Identity() +
-        xi_hat * ((c - st) / std::pow(theta, 2)) * xi_hat.transpose()) * basis();
-  }
-  return exp_p_xi_hat;
+  return result;
 }
 
 /* ************************************************************************* */
 Vector2 Unit3::localCoordinates(const Unit3& other) const {
-  const double x = p_.dot(other.p_);
-  // Crucial quantity here is y = theta/sin(theta) with theta=acos(x)
-  // Now, y = acos(x) / sin(acos(x)) = acos(x)/sqrt(1-x^2)
-  // We treat the special case 1 and -1 below
-  const double x2 = x * x;
-  const double z = 1 - x2;
-  double y;
-  if (z < std::numeric_limits<double>::epsilon()) {
-    if (x > 0)  // first order expansion at x=1
-      y = 1.0 - (x - 1.0) / 3.0;
-    else  // cop out
-      return Vector2(M_PI, 0.0);
-  } else {
-    // no special case
-    y = acos(x) / sqrt(z);
+  return localCoordinates(other, {}, {});
+}
+
+Vector2 Unit3::localCoordinates(const Unit3& other, OptionalJacobian<2, 2> H1,
+                               OptionalJacobian<2, 2> H2) const {
+  Matrix12 Hcos1, Hcos2;
+  const double cosine = dot(other, H1 ? &Hcos1 : nullptr,
+                           H2 ? &Hcos2 : nullptr);
+  const double sineSquared = 1.0 - cosine * cosine;
+  if (cosine < 0 && sineSquared < std::numeric_limits<double>::epsilon()) {
+    if (H1 || H2)
+      throw std::domain_error("Unit3::localCoordinates derivative at antipode");
+    return Vector2(M_PI, 0.0);
   }
-  return basis().transpose() * y * (other.p_ - x * p_);
+
+  // scale = acos(cosine)/sqrt(1-cosine^2). Its series avoids cancellation
+  // in both the value and derivative near coincident directions.
+  double scale, scaleDerivative;
+  const double distanceFromOne = 1.0 - cosine;
+  if (distanceFromOne < 1e-5) {
+    scale = 1.0 + distanceFromOne / 3.0 +
+            2.0 * distanceFromOne * distanceFromOne / 15.0;
+    scaleDerivative = -1.0 / 3.0 - 4.0 * distanceFromOne / 15.0;
+  } else {
+    scale = std::acos(cosine) / std::sqrt(sineSquared);
+    scaleDerivative = (cosine * scale - 1.0) / sineSquared;
+  }
+
+  Matrix2 Herror1, Herror2;
+  const Vector2 error = errorVector(other, H1 ? &Herror1 : nullptr,
+                                   H2 ? &Herror2 : nullptr);
+  if (H1) *H1 = scale * Herror1 + scaleDerivative * error * Hcos1;
+  if (H2) *H2 = scale * Herror2 + scaleDerivative * error * Hcos2;
+  return scale * error;
 }
 /* ************************************************************************* */
 

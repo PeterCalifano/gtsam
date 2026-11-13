@@ -19,13 +19,18 @@
  *  @date   Sept 2013
  */
 
-#include "smartFactorScenarios.h"
-#include <gtsam/slam/ProjectionFactor.h>
-#include <gtsam/slam/PoseTranslationPrior.h>
-#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
-#include <gtsam/base/numericalDerivative.h>
 #include <CppUnitLite/TestHarness.h>
+#include <gtsam/base/VectorConstants.h>
+#include <gtsam/base/numericalDerivative.h>
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/slam/PoseTranslationPrior.h>
+#include <gtsam/slam/ProjectionFactor.h>
+#include <gtsam/slam/SmartProjectionFactor.h>
+
 #include <iostream>
+#include <type_traits>
+
+#include "smartFactorScenarios.h"
 
 using namespace std::placeholders;
 
@@ -54,6 +59,25 @@ LevenbergMarquardtParams makeLMParams(bool verbose = false) {
 }
 
 }
+
+/* ************************************************************************* */
+namespace hierarchy {
+
+using Camera = PinholePose<Cal3_S2>;
+using ProjectionBase = SmartProjectionFactorBase<Camera>;
+using CameraFactor = SmartProjectionFactor<Camera>;
+using PoseFactor = SmartProjectionPoseFactor<Cal3_S2>;
+
+// Verifies that camera-variable and pose-variable factors share only the
+// projection-specific implementation base.
+TEST(SmartProjectionPoseFactor, CommonProjectionBase) {
+  EXPECT((std::is_base_of_v<ProjectionBase, CameraFactor>));
+  EXPECT((std::is_base_of_v<ProjectionBase, PoseFactor>));
+  EXPECT(!(std::is_base_of_v<CameraFactor, PoseFactor>));
+}
+
+}  // namespace hierarchy
+/* ************************************************************************* */
 
 /* ************************************************************************* */
 TEST( SmartProjectionPoseFactor, Constructor) {
@@ -386,9 +410,7 @@ TEST( SmartProjectionPoseFactor, Factors ) {
   double expectedError = 2500;
 
   // After eliminating the point, A1 and A2 contain 2-rank information on cameras:
-  Matrix16 A1, A2;
-  A1 << -10, 0, 0, 0, 1, 0;
-  A2 << 10, 0, 1, 0, -1, 0;
+  Matrix16 A1{-10, 0, 0, 0, 1, 0}, A2{10, 0, 1, 0, -1, 0};
   A1 *= 10. / sigma;
   A2 *= 10. / sigma;
   Matrix expectedInformation; // filled below
@@ -1083,6 +1105,7 @@ TEST( SmartProjectionPoseFactor, Hessian ) {
 }
 
 /* *************************************************************************/
+// Verifies that the Hessian is invariant to a rigid motion of all cameras.
 TEST( SmartProjectionPoseFactor, HessianWithRotation ) {
   // cout << " ************************ SmartProjectionPoseFactor: rotated Hessian **********************" << endl;
 
@@ -1105,6 +1128,11 @@ TEST( SmartProjectionPoseFactor, HessianWithRotation ) {
   std::shared_ptr<GaussianFactor> factor = smartFactorInstance->linearize(
       values);
 
+  // Entries are O(1e7), so scale the tolerance with the matrix: a fixed 1e-7
+  // allows only a few dozen ULPs and fails under benign rounding changes.
+  const Matrix information = factor->information();
+  const double tolerance = 1e-12 * information.norm();
+
   Pose3 poseDrift = Pose3(Rot3::Ypr(-M_PI / 2, 0., -M_PI / 2), Point3(0, 0, 0));
 
   Values rotValues;
@@ -1116,7 +1144,7 @@ TEST( SmartProjectionPoseFactor, HessianWithRotation ) {
       rotValues);
 
   // Hessian is invariant to rotations in the nondegenerate case
-  EXPECT(assert_equal(factor->information(), factorRot->information(), 1e-7));
+  EXPECT(assert_equal(information, factorRot->information(), tolerance));
 
   Pose3 poseDrift2 = Pose3(Rot3::Ypr(-M_PI / 2, -M_PI / 3, -M_PI / 2),
       Point3(10, -4, 5));
@@ -1130,7 +1158,7 @@ TEST( SmartProjectionPoseFactor, HessianWithRotation ) {
       smartFactorInstance->linearize(tranValues);
 
   // Hessian is invariant to rotations and translations in the nondegenerate case
-  EXPECT(assert_equal(factor->information(), factorRotTran->information(), 1e-7));
+  EXPECT(assert_equal(information, factorRotTran->information(), tolerance));
 }
 
 /* *************************************************************************/
@@ -1340,4 +1368,3 @@ int main() {
   return TestRegistry::runAllTests(tr);
 }
 /* ************************************************************************* */
-

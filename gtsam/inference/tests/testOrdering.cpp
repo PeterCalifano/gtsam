@@ -17,10 +17,12 @@
 
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/symbolic/SymbolicFactorGraph.h>
+#include <gtsam/symbolic/SymbolicBayesTree.h>
 #include <gtsam/inference/Ordering.h>
 #include <gtsam/inference/MetisIndex.h>
 #include <gtsam/base/TestableAssertions.h>
 #include <CppUnitLite/TestHarness.h>
+
 
 using namespace std;
 using namespace gtsam;
@@ -104,6 +106,50 @@ TEST(Ordering, grouped_constrained_ordering) {
   Ordering actual = Ordering::ColamdConstrained(symbolicGraph, constraints);
   Ordering expected{ 0, 1, 3, 2, 4, 5 };
   EXPECT(assert_equal(expected, actual));
+}
+
+/* ************************************************************************* */
+TEST(Ordering, grouped_constrained_ordering_any_labels) {
+  // Same groups as above, with labels that are neither consecutive nor from 0
+  SymbolicFactorGraph symbolicGraph = example::symbolicChain();
+  FastMap<Key, int> constraints;
+  constraints[0] = -5;
+  constraints[1] = -5;
+  constraints[2] = 10;
+  constraints[3] = -5;
+  constraints[4] = 10;
+  constraints[5] = 20;
+
+  Ordering actual = Ordering::ColamdConstrained(symbolicGraph, constraints);
+  Ordering expected{ 0, 1, 3, 2, 4, 5 };
+  EXPECT(assert_equal(expected, actual));
+}
+
+/* ************************************************************************* */
+TEST(Ordering, grouped_constrained_ordering_labels_not_below_size) {
+  // CCOLAMD accepts groups in [0, n) only, n being the number of variables.
+  SymbolicFactorGraph graph;
+  graph.push_factor(0, 1);
+
+  // A group equal to n used to overflow CCOLAMD's arrays.
+  {
+    FastMap<Key, int> constraints;
+    constraints[0] = 2;
+    constraints[1] = 2;
+    Ordering actual = Ordering::ColamdConstrained(graph, constraints);
+    Ordering expected{ 0, 1 };
+    EXPECT(assert_equal(expected, actual));
+  }
+
+  // A group above n used to make CCOLAMD fail.
+  {
+    FastMap<Key, int> constraints;
+    constraints[0] = 3;
+    constraints[1] = 2;
+    Ordering actual = Ordering::ColamdConstrained(graph, constraints);
+    Ordering expected{ 1, 0 };
+    EXPECT(assert_equal(expected, actual));
+  }
 }
 
 /* ************************************************************************* */
@@ -290,6 +336,125 @@ TEST(Ordering, Metis) {
   EXPECT(adjExpected == mi.adj());
 
   Ordering metis = Ordering::Metis(symbolicGraph);
+}
+
+/* ************************************************************************* */
+// An edgeless graph needs no fill reduction, so METIS ordering returns every
+// isolated variable without calling METIS_NodeND.
+TEST(Ordering, MetisEdgelessGraph) {
+  SymbolicFactorGraph symbolicGraph;
+  symbolicGraph.push_factor(0);
+  symbolicGraph.push_factor(1);
+
+  EXPECT((vector<int32_t>{0, 0, 0}) == MetisIndex(symbolicGraph).xadj());
+  const Ordering metis = Ordering::Metis(symbolicGraph);
+
+  EXPECT_LONGS_EQUAL(2, metis.size());
+  EXPECT(metis.contains(0));
+  EXPECT(metis.contains(1));
+}
+
+/* ************************************************************************* */
+namespace isolated_keys_fixture {
+
+// Interleave isolated keys with a connected component in internal index order.
+SymbolicFactorGraph MixedGraph() {
+  SymbolicFactorGraph graph;
+  graph.push_factor(100);
+  graph.push_factor(10, 30);
+  graph.push_factor(200);
+  graph.push_factor(30, 20);
+  graph.push_factor(300);
+  return graph;
+}
+
+// Every vertex needs a CSR row, including isolated vertices at any position.
+TEST(Ordering, MetisIsolatedKeysCsr) {
+  const MetisIndex index(MixedGraph());
+  EXPECT_LONGS_EQUAL(6, index.nValues());
+  EXPECT((vector<int32_t>{0, 0, 1, 3, 3, 4, 4}) == index.xadj());
+  EXPECT((vector<int32_t>{2, 1, 4, 2}) == index.adj());
+}
+
+// Mixed connected and isolated keys must order and eliminate into all components.
+TEST(Ordering, MetisIsolatedKeysElimination) {
+  const SymbolicFactorGraph graph = MixedGraph();
+  for (int seed : {0, 42, 4321}) {
+    const Ordering ordering = Ordering::Metis(graph, seed);
+    EXPECT_LONGS_EQUAL(6, ordering.size());
+    for (Key key : graph.keys()) EXPECT(ordering.contains(key));
+    const auto tree = graph.eliminateMultifrontal(ordering);
+    EXPECT_LONGS_EQUAL(6, tree->nodes().size());
+    EXPECT_LONGS_EQUAL(4, tree->roots().size());
+    for (Key key : {100, 200, 300}) {
+      EXPECT_LONGS_EQUAL(1, (*tree)[key]->conditional()->size());
+    }
+  }
+}
+
+}  // namespace isolated_keys_fixture
+/* ************************************************************************* */
+namespace {
+// 3x5 grid from the METIS manual (same graph as the csr_format test).
+SymbolicFactorGraph metisManualExampleGraph() {
+  SymbolicFactorGraph symbolicGraph;
+  symbolicGraph.push_factor(0, 1);
+  symbolicGraph.push_factor(1, 2);
+  symbolicGraph.push_factor(2, 3);
+  symbolicGraph.push_factor(3, 4);
+  symbolicGraph.push_factor(5, 6);
+  symbolicGraph.push_factor(6, 7);
+  symbolicGraph.push_factor(7, 8);
+  symbolicGraph.push_factor(8, 9);
+  symbolicGraph.push_factor(10, 11);
+  symbolicGraph.push_factor(11, 12);
+  symbolicGraph.push_factor(12, 13);
+  symbolicGraph.push_factor(13, 14);
+  symbolicGraph.push_factor(0, 5);
+  symbolicGraph.push_factor(5, 10);
+  symbolicGraph.push_factor(1, 6);
+  symbolicGraph.push_factor(6, 11);
+  symbolicGraph.push_factor(2, 7);
+  symbolicGraph.push_factor(7, 12);
+  symbolicGraph.push_factor(3, 8);
+  symbolicGraph.push_factor(8, 13);
+  symbolicGraph.push_factor(4, 9);
+  symbolicGraph.push_factor(9, 14);
+  return symbolicGraph;
+}
+}  // namespace
+
+/* ************************************************************************* */
+// The default path must stay bit-identical: METIS falls back to seed 4321
+// when given no options, so the default argument reproduces it.
+TEST(Ordering, MetisSeedDefaultUnchanged) {
+  const SymbolicFactorGraph symbolicGraph = metisManualExampleGraph();
+
+  const Ordering ordering = Ordering::Metis(symbolicGraph);
+  EXPECT(assert_equal(ordering, Ordering::Metis(symbolicGraph, 4321)));
+
+#if !defined(__APPLE__) && !defined(__QNX__) && !defined(_WIN32)
+  // Golden permutation captured from an unpatched develop build (Linux METIS
+  // draw; platform-dependent like the MetisLoop expectations below).
+  Ordering expected{ 12, 0, 10, 6, 11, 5, 14, 2, 8, 4, 9, 3, 1, 7, 13 };
+  EXPECT(assert_equal(expected, ordering));
+#endif
+}
+
+/* ************************************************************************* */
+// Every seed yields a valid permutation of all keys and is deterministic per
+// seed. (Different seeds MAY coincide on small graphs.)
+TEST(Ordering, MetisSeedValidAndDeterministic) {
+  const SymbolicFactorGraph symbolicGraph = metisManualExampleGraph();
+
+  for (const int seed : {0, 1, 7, 42}) {
+    const Ordering ordering = Ordering::Metis(symbolicGraph, seed);
+    EXPECT(assert_equal(ordering, Ordering::Metis(symbolicGraph, seed)));
+    EXPECT_LONGS_EQUAL(15, ordering.size());
+    for (Key key = 0; key < 15; ++key) {
+      EXPECT(ordering.contains(key));
+    }
+  }
 }
 
 /* ************************************************************************* */

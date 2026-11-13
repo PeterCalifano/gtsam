@@ -1,3 +1,5 @@
+#include "python/gtsam/errors_pybind.h"
+
 /* Please refer to:
  * https://pybind11.readthedocs.io/en/stable/advanced/cast/stl.html
  * These are required to save one copy operation on Python calls.
@@ -10,3 +12,6 @@
  * Without this they will be automatically converted to a Python object, and all
  * mutations on Python side will not be reflected on C++.
  */
+
+// linear.cpp's generated exports supply the noise-model keys themselves.
+#define GTSAM_PYTHON_GENERATED_NOISE_MODEL_EXPORTS

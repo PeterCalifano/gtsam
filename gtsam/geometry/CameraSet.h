@@ -122,10 +122,9 @@ class CameraSet : public std::vector<CAMERA, Eigen::aligned_allocator<CAMERA>> {
 
     // Project and fill derivatives
     for (size_t i = 0; i < m; i++) {
-      MatrixZD Fi;
       Eigen::Matrix<double, ZDim, N> Ei;
-      z.emplace_back(this->at(i).project2(point, Fs ? &Fi : 0, E ? &Ei : 0));
-      if (Fs) (*Fs)[i] = Fi;
+      z.emplace_back(this->at(i).project2(point, Fs ? &(*Fs)[i] : nullptr,
+                                        E ? &Ei : nullptr));
       if (E) E->block<ZDim, N>(ZDim * i, 0) = Ei;
     }
 
@@ -480,9 +479,6 @@ class CameraSet : public std::vector<CAMERA, Eigen::aligned_allocator<CAMERA>> {
     ar&(*this);
   }
 #endif
-
- public:
-  GTSAM_MAKE_ALIGNED_OPERATOR_NEW
 };
 
 template <class CAMERA>

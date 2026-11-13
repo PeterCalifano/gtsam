@@ -27,7 +27,7 @@ Vector CustomFactor::unwhitenedError(const Values& x, OptionalMatrixVecType H) c
 
     if(H) {
       /*
-       * In this case, we pass the raw pointer to the `std::vector<Matrix>` object directly to pybind.
+       * In this case, we pass a reference to the `std::vector<Matrix>` object directly to pybind.
        * As the type `std::vector<Matrix>` has been marked as opaque in `preamble/custom.h`, any changes in
        * Python will be immediately reflected on the C++ side.
        *
@@ -43,17 +43,25 @@ Vector CustomFactor::unwhitenedError(const Values& x, OptionalMatrixVecType H) c
        *    return error
        * ```
        */
-      return this->error_function_(*this, x, H);
+      return this->error_function_(*this, x, std::ref(*H));
     } else {
       /*
-       * In this case, we pass the a `nullptr` to pybind, and it will translate to `None` in Python.
+       * In this case, we pass `std::nullopt` to pybind, and it will translate to `None` in Python.
        * Users can check for `None` in their callback to determine if the Jacobian is requested.
        */
-      return this->error_function_(*this, x, nullptr);
+      return this->error_function_(*this, x, std::nullopt);
     }
   } else {
     return Vector::Zero(this->dim());
   }
+}
+
+std::optional<Vector> CustomFactor::parameterVjp(
+    const Values& values, const ParameterTag& parameter,
+    const Vector& factorResidualCotangent) const {
+  if (!parameter_vjp_function_) return std::nullopt;
+  return parameter_vjp_function_(*this, values, parameter,
+                                factorResidualCotangent);
 }
 
 void CustomFactor::print(const std::string &s, const KeyFormatter &keyFormatter) const {

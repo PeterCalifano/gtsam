@@ -59,7 +59,7 @@ virtual class NonlinearFactorGraph {
   void replace(size_t i, gtsam::NonlinearFactor* factors);
   void resize(size_t size);
   size_t nrFactors() const;
-  gtsam::NonlinearFactor* at(size_t idx) const;
+  const std::shared_ptr<gtsam::NonlinearFactor> at(size_t idx) const;
   void push_back(const gtsam::NonlinearFactorGraph& factors);
   void push_back(gtsam::NonlinearFactor* factor);
   void add(gtsam::NonlinearFactor* factor);
@@ -105,7 +105,13 @@ virtual class NonlinearFactorGraph {
   void printErrors(const gtsam::Values& values,
                    const string& str = "NonlinearFactorGraph: ",
                    const gtsam::KeyFormatter& keyFormatter =
-                       gtsam::DefaultKeyFormatter) const;
+                       gtsam::DefaultKeyFormatter,
+                   const gtsam::FactorErrorPredicate& printCondition =
+                       gtsam::FactorErrorPredicate{
+                           [](const gtsam::Factor*, double, size_t) {
+                             return true;
+                           }})
+      const;
   double error(const gtsam::Values& values) const;
   double probPrime(const gtsam::Values& values) const;
   gtsam::Ordering orderingCOLAMD() const;
@@ -118,7 +124,8 @@ virtual class NonlinearFactorGraph {
   string dot(
       const gtsam::Values& values,
       const gtsam::KeyFormatter& keyFormatter = gtsam::DefaultKeyFormatter,
-      const gtsam::GraphvizFormatting& writer = gtsam::GraphvizFormatting());
+      const gtsam::GraphvizFormatting& writer = gtsam::GraphvizFormatting())
+      const;
   void saveGraph(
       const string& s, const gtsam::Values& values,
       const gtsam::KeyFormatter& keyFormatter = gtsam::DefaultKeyFormatter,
@@ -129,11 +136,18 @@ virtual class NonlinearFactorGraph {
   void serialize() const;
 };
 
+#include <gtsam/nonlinear/ParameterTag.h>
+class ParameterTag {
+  ParameterTag(string name = "");
+  ParameterTag(const gtsam::ParameterTag& other);
+  const string& name() const;
+  bool equals(const gtsam::ParameterTag& other) const;
+  size_t hash() const;
+  void print(string prefix = "ParameterTag: ") const;
+};
+
 #include <gtsam/nonlinear/NonlinearFactor.h>
 virtual class NonlinearFactor : gtsam::Factor {
-  // Factor base class
-  void print(string s = "", const gtsam::KeyFormatter& keyFormatter =
-                                gtsam::DefaultKeyFormatter) const;
   // NonlinearFactor
   bool equals(const gtsam::NonlinearFactor& f, double tol) const;
   double error(const gtsam::Values& c) const;
@@ -147,12 +161,16 @@ virtual class NonlinearFactor : gtsam::Factor {
 
 #include <gtsam/nonlinear/NonlinearFactor.h>
 virtual class NoiseModelFactor : gtsam::NonlinearFactor {
-  bool equals(const gtsam::NoiseModelFactor& f, double tol) const;
-  gtsam::noiseModel::Base* noiseModel() const;
+  const std::shared_ptr<gtsam::noiseModel::Base>& noiseModel() const;
   gtsam::NoiseModelFactor* cloneWithNewNoiseModel(
       gtsam::noiseModel::Base* newNoise) const;
-  gtsam::Vector unwhitenedError(const gtsam::Values& x) const;
+  gtsam::Vector unwhitenedError(
+      const gtsam::Values& x,
+      gtsam::OptionalMatrixVecType H = nullptr) const;
   gtsam::Vector whitenedError(const gtsam::Values& c) const;
+  std::optional<gtsam::Vector> parameterVjp(
+      const gtsam::Values& values, const gtsam::ParameterTag& parameter,
+      const gtsam::Vector& factorResidualCotangent) const;
 };
 
 #include <gtsam/nonlinear/Marginals.h>
@@ -166,8 +184,8 @@ class Marginals {
 
   void print(string s = "Marginals: ", const gtsam::KeyFormatter& keyFormatter =
                                            gtsam::DefaultKeyFormatter) const;
-  gtsam::Matrix marginalCovariance(size_t variable) const;
-  gtsam::Matrix marginalInformation(size_t variable) const;
+  gtsam::Matrix marginalCovariance(gtsam::Key variable) const;
+  gtsam::Matrix marginalInformation(gtsam::Key variable) const;
   gtsam::JointMarginal jointMarginalCovariance(
       const gtsam::KeyVector& variables) const;
   gtsam::JointMarginal jointMarginalInformation(
@@ -175,13 +193,47 @@ class Marginals {
   void deleteCachedShortcuts();
 };
 
+#include <gtsam/nonlinear/Gradients.h>
+class Gradients {
+  enum Factorization { CHOLESKY, QR };
+
+  Gradients(const gtsam::NonlinearFactorGraph& graph,
+            const gtsam::Values& solution,
+            gtsam::Gradients::Factorization factorization =
+                gtsam::Gradients::Factorization::CHOLESKY);
+  Gradients(const gtsam::NonlinearFactorGraph& graph,
+            const gtsam::Values& solution, const gtsam::Ordering& ordering,
+            gtsam::Gradients::Factorization factorization =
+                gtsam::Gradients::Factorization::CHOLESKY);
+  Gradients(const gtsam::GaussianFactorGraph& graph,
+            gtsam::Gradients::Factorization factorization =
+                gtsam::Gradients::Factorization::CHOLESKY);
+  Gradients(const gtsam::GaussianFactorGraph& graph,
+            const gtsam::Ordering& ordering,
+            gtsam::Gradients::Factorization factorization =
+                gtsam::Gradients::Factorization::CHOLESKY);
+  Gradients(const gtsam::GaussianFactorGraph& linearizedGraph,
+            const gtsam::GaussianBayesTree& bayesTree);
+
+  gtsam::VectorValues adjoint(const gtsam::VectorValues& stateCotangents) const;
+  std::optional<gtsam::Vector> parameterGradient(
+      const gtsam::VectorValues& stateCotangents,
+      const gtsam::ParameterTag& parameter) const;
+  std::optional<gtsam::Vector> noiseGradient(
+      const gtsam::VectorValues& stateCotangents,
+      const gtsam::noiseModel::Base* model) const;
+  gtsam::VectorValues pushforward(const gtsam::Errors& factorResidualDirection) const;
+  gtsam::Errors pullback(const gtsam::VectorValues& stateCotangents) const;
+  void print(string prefix = "Gradients: ") const;
+};
+
 #include <gtsam/nonlinear/LinearContainerFactor.h>
 virtual class LinearContainerFactor : gtsam::NonlinearFactor {
-  LinearContainerFactor(gtsam::GaussianFactor* factor,
-                        const gtsam::Values& linearizationPoint);
-  LinearContainerFactor(gtsam::GaussianFactor* factor);
+  LinearContainerFactor(
+      const std::shared_ptr<gtsam::GaussianFactor>& factor,
+      const gtsam::Values& linearizationPoint = gtsam::Values());
 
-  gtsam::GaussianFactor* factor() const;
+  const std::shared_ptr<gtsam::GaussianFactor>& factor() const;
   //  const std::optional<Values>& linearizationPoint() const;
 
   bool isJacobian() const;
@@ -190,10 +242,7 @@ virtual class LinearContainerFactor : gtsam::NonlinearFactor {
 
   static gtsam::NonlinearFactorGraph ConvertLinearGraph(
       const gtsam::GaussianFactorGraph& linear_graph,
-      const gtsam::Values& linearizationPoint);
-
-  static gtsam::NonlinearFactorGraph ConvertLinearGraph(
-      const gtsam::GaussianFactorGraph& linear_graph);
+      const gtsam::Values& linearizationPoint = gtsam::Values());
 
   // enabling serialization functionality
   void serializable() const;
@@ -204,10 +253,21 @@ virtual class LinearContainerFactor : gtsam::NonlinearFactor {
 //*************************************************************************
 #include <gtsam/nonlinear/NonlinearOptimizerParams.h>
 virtual class NonlinearOptimizerParams {
+  enum Verbosity { SILENT, TERMINATION, ERROR, VALUES, DELTA, LINEAR };
+  enum LinearSolverType {
+    MULTIFRONTAL_SOLVER,
+    MULTIFRONTAL_CHOLESKY,
+    MULTIFRONTAL_QR,
+    SEQUENTIAL_CHOLESKY,
+    SEQUENTIAL_QR,
+    Iterative,
+    CHOLMOD
+  };
+
   NonlinearOptimizerParams();
   void print(string str = "") const;
 
-  int getMaxIterations() const;
+  size_t getMaxIterations() const;
   double getRelativeErrorTol() const;
   double getAbsoluteErrorTol() const;
   double getErrorTol() const;
@@ -217,28 +277,36 @@ virtual class NonlinearOptimizerParams {
   void setRelativeErrorTol(double value);
   void setAbsoluteErrorTol(double value);
   void setErrorTol(double value);
-  void setVerbosity(string src);
+  void setVerbosity(const string& src);
 
   string getLinearSolverType() const;
-  void setLinearSolverType(string solver);
+  void setLinearSolverType(const string& solver);
+  gtsam::NonlinearOptimizerParams::LinearSolverType getLinearSolver() const;
+  void setLinearSolver(
+      gtsam::NonlinearOptimizerParams::LinearSolverType solver);
 
   void setIterativeParams(gtsam::IterativeOptimizationParameters* params);
   void setOrdering(const gtsam::Ordering& ordering);
   string getOrderingType() const;
-  void setOrderingType(string ordering);
+  void setOrderingType(const string& ordering);
 
   bool isMultifrontal() const;
   bool isSequential() const;
   bool isCholmod() const;
   bool isIterative() const;
 
+  // Imperative multifrontal settings, also used by Gaussian/nonlinear ALM.
+  gtsam::MultifrontalParameters multifrontalParams;
+
   // This only applies to python since matlab does not have lambda machinery.
   gtsam::NonlinearOptimizerParams::IterationHook iterationHook;
 };
 
-bool checkConvergence(double relativeErrorTreshold,
-                      double absoluteErrorTreshold, double errorThreshold,
-                      double currentError, double newError);
+bool checkConvergence(
+    double relativeErrorThreshold, double absoluteErrorThreshold,
+    double errorThreshold, double currentError, double newError,
+    gtsam::NonlinearOptimizerParams::Verbosity verbosity =
+        gtsam::NonlinearOptimizerParams::SILENT);
 bool checkConvergence(const gtsam::NonlinearOptimizerParams& params,
                       double currentError, double newError);
 
@@ -266,8 +334,8 @@ virtual class LevenbergMarquardtParams : gtsam::NonlinearOptimizerParams {
   void setlambdaLowerBound(double value);
   void setlambdaUpperBound(double value);
   void setUseFixedLambdaFactor(bool flag);
-  void setLogFile(string s);
-  void setVerbosityLM(string s);
+  void setLogFile(const string& s);
+  void setVerbosityLM(const string& s);
 
   static gtsam::LevenbergMarquardtParams LegacyDefaults();
   static gtsam::LevenbergMarquardtParams CeresDefaults();
@@ -286,8 +354,8 @@ virtual class DoglegParams : gtsam::NonlinearOptimizerParams {
   double getDeltaInitial() const;
   string getVerbosityDL() const;
 
-  void setDeltaInitial(double deltaInitial) const;
-  void setVerbosityDL(string verbosityDL) const;
+  void setDeltaInitial(double deltaInitial);
+  void setVerbosityDL(const string& verbosityDL);
 };
 
 #include <gtsam/nonlinear/GncParams.h>
@@ -305,9 +373,10 @@ virtual class GncParams {
   PARAMS baseOptimizerParams;
   gtsam::GncLossType lossType;
   size_t maxIterations;
-  double muStep;
+  double lambdaStep;
   double relativeCostTol;
   double weightsTol;
+  double lambdaMax;
   gtsam::This::Verbosity verbosity;
   gtsam::This::IndexVector knownInliers;
   gtsam::This::IndexVector knownOutliers;
@@ -316,7 +385,7 @@ virtual class GncParams {
 
   void setLossType(const gtsam::GncLossType type);
   void setMaxIterations(const size_t maxIter);
-  void setMuStep(const double step);
+  void setLambdaStep(const double step);
   void setRelativeCostTol(double value);
   void setWeightsTol(double value);
   void setVerbosityGNC(const gtsam::This::Verbosity value);
@@ -326,7 +395,7 @@ virtual class GncParams {
   void setScheduler(const gtsam::GncScheduler scheduler);
   void print(const string& str = "GncParams: ") const;
 
-  enum Verbosity { SILENT, SUMMARY, MU, WEIGHTS, VALUES };
+  enum Verbosity { SILENT, SUMMARY, LAMBDA, WEIGHTS, VALUES };
 };
 
 typedef gtsam::GncParams<gtsam::GaussNewtonParams> GncGaussNewtonParams;
@@ -334,13 +403,13 @@ typedef gtsam::GncParams<gtsam::LevenbergMarquardtParams> GncLMParams;
 
 #include <gtsam/nonlinear/NonlinearOptimizer.h>
 virtual class NonlinearOptimizer {
-  gtsam::Values optimize();
-  gtsam::Values optimizeSafely();
+  const gtsam::Values& optimize();
+  const gtsam::Values& optimizeSafely();
   double error() const;
-  int iterations() const;
-  gtsam::Values values() const;
-  gtsam::NonlinearFactorGraph graph() const;
-  gtsam::GaussianFactorGraph* iterate() const;
+  size_t iterations() const;
+  const gtsam::Values& values() const;
+  const gtsam::NonlinearFactorGraph& graph() const;
+  gtsam::GaussianFactorGraph* iterate();
 };
 
 #include <gtsam/nonlinear/GaussNewtonOptimizer.h>
@@ -369,10 +438,10 @@ virtual class GncOptimizer {
   GncOptimizer(const gtsam::NonlinearFactorGraph& graph,
                const gtsam::Values& initialValues, const PARAMS& params);
   void setInlierCostThresholds(const double inth);
-  const gtsam::Vector& getInlierCostThresholds();
+  const gtsam::Vector& getInlierCostThresholds() const;
   void setInlierCostThresholdsAtProbability(const double alpha);
   void setWeights(const gtsam::Vector w);
-  const gtsam::Vector& getWeights();
+  const gtsam::Vector& getWeights() const;
   gtsam::Values optimize();
 };
 
@@ -419,7 +488,7 @@ class ISAM2DoglegParams {
   double getInitialDelta() const;
   void setInitialDelta(double initialDelta);
   string getAdaptationMode() const;
-  void setAdaptationMode(string adaptationMode);
+  void setAdaptationMode(const string& adaptationMode);
   bool isVerbose() const;
   void setVerbose(bool verbose);
 };
@@ -461,7 +530,8 @@ class ISAM2ThresholdMap {
   void clear();
 
   // structure specific methods
-  void insert(const gtsam::ISAM2ThresholdMapValue& value) const;
+  @pybind_lambda
+  void insert(const gtsam::ISAM2ThresholdMapValue& value);
 };
 
 class ISAM2Params {
@@ -471,15 +541,12 @@ class ISAM2Params {
 
   /** Getters and Setters for all properties */
   void setOptimizationParams(
-      const gtsam::ISAM2GaussNewtonParams& gauss_newton__params);
-  void setOptimizationParams(
-      const gtsam::ISAM2DoglegParams& optimizationParams);
-  void setOptimizationParams(
-      const gtsam::ISAM2DoglegLineSearchParams& optimizationParams);
-  void setRelinearizeThreshold(double relinearizeThreshold);
-  void setRelinearizeThreshold(const gtsam::ISAM2ThresholdMap& threshold_map);
+      const gtsam::ISAM2Params::OptimizationParams& optimizationParams);
+  void setRelinearizeThreshold(
+      const gtsam::ISAM2Params::RelinearizationThreshold&
+          relinearizeThreshold);
   string getFactorization() const;
-  void setFactorization(string factorization);
+  void setFactorization(const string& factorization);
 
   int relinearizeSkip;
   bool enableRelinearization;
@@ -488,6 +555,8 @@ class ISAM2Params {
   bool enableDetailedResults;
   bool enablePartialRelinearizationCheck;
   bool findUnusedFactorSlots;
+  bool enableAdaptiveReorder;
+  double adaptiveReorderThreshold;
 
   enum Factorization { CHOLESKY, QR };
   gtsam::ISAM2Params::Factorization factorization;
@@ -498,7 +567,7 @@ class ISAM2Clique {
   ISAM2Clique();
 
   // Standard Interface
-  gtsam::Vector gradientContribution() const;
+  const gtsam::Vector& gradientContribution() const;
   void print(string s = "",
              gtsam::KeyFormatter keyFormatter = gtsam::DefaultKeyFormatter);
 };
@@ -513,8 +582,26 @@ class ISAM2Result {
   size_t getVariablesReeliminated() const;
   gtsam::FactorIndices getNewFactorsIndices() const;
   size_t getCliques() const;
+  size_t getTreeNnz() const;
+  bool getBatchReorderTriggered() const;
   double getErrorBefore() const;
   double getErrorAfter() const;
+  size_t getFactorsRecalculated() const;
+  const gtsam::KeySet& getUnusedKeys() const;
+  const gtsam::KeyVector& getObservedKeys() const;
+  const gtsam::KeySet& getKeysWithRemovedFactors() const;
+  const gtsam::KeySet& getMarkedKeys() const;
+};
+
+class ISAM2UpdateParams {
+  ISAM2UpdateParams();
+
+  gtsam::FactorIndices removeFactorIndices;
+  std::optional<gtsam::KeyGroupMap> constrainedKeys;
+  std::optional<gtsam::KeyList> noRelinKeys;
+  std::optional<gtsam::KeyList> extraReelimKeys;
+  bool force_relinearize;
+  bool forceFullSolve;
 };
 
 class ISAM2 {
@@ -529,38 +616,52 @@ class ISAM2 {
   bool empty() const;
   size_t numCachedSeparatorMarginals() const;
   void printStats() const;
-  void saveGraph(string s) const;
-  gtsam::GaussianConditional* marginalFactor(gtsam::Key key) const;
-  gtsam::GaussianFactorGraph* joint(gtsam::Key key1, gtsam::Key key2) const;
-  gtsam::GaussianFactorGraph* joint(const gtsam::KeyVector& queryKeys) const;
-  gtsam::GaussianBayesNet* jointBayesNet(gtsam::Key key1,
-                                         gtsam::Key key2) const;
-  gtsam::GaussianBayesNet* jointBayesNet(
-      const gtsam::KeyVector& queryKeys) const;
+  void saveGraph(
+      const string& filename,
+      const gtsam::KeyFormatter& keyFormatter = gtsam::DefaultKeyFormatter)
+      const;
+  std::shared_ptr<gtsam::GaussianConditional> marginalFactor(
+      gtsam::Key j,
+      const gtsam::GaussianFactorGraph::Eliminate& function =
+          gtsam::GaussianFactorGraph::Eliminate(
+              gtsam::GaussianFactorGraph::EliminationTraitsType::DefaultEliminate))
+      const;
+  std::shared_ptr<gtsam::GaussianFactorGraph> joint(
+      gtsam::Key j1, gtsam::Key j2,
+      const gtsam::GaussianFactorGraph::Eliminate& function =
+          gtsam::GaussianFactorGraph::Eliminate(
+              gtsam::GaussianFactorGraph::EliminationTraitsType::DefaultEliminate))
+      const;
+  std::shared_ptr<gtsam::GaussianFactorGraph> joint(
+      const gtsam::KeyVector& keys,
+      const gtsam::GaussianFactorGraph::Eliminate& function =
+          gtsam::GaussianFactorGraph::Eliminate(
+              gtsam::GaussianFactorGraph::EliminationTraitsType::DefaultEliminate))
+      const;
+  std::shared_ptr<gtsam::GaussianBayesNet> jointBayesNet(
+      gtsam::Key j1, gtsam::Key j2,
+      const gtsam::GaussianFactorGraph::Eliminate& function =
+          gtsam::GaussianFactorGraph::Eliminate(
+              gtsam::GaussianFactorGraph::EliminationTraitsType::DefaultEliminate))
+      const;
+  std::shared_ptr<gtsam::GaussianBayesNet> jointBayesNet(
+      const gtsam::KeyVector& keys,
+      const gtsam::GaussianFactorGraph::Eliminate& function =
+          gtsam::GaussianFactorGraph::Eliminate(
+              gtsam::GaussianFactorGraph::EliminationTraitsType::DefaultEliminate))
+      const;
   void deleteCachedShortcuts();
 
-  gtsam::ISAM2Result update();
-  gtsam::ISAM2Result update(const gtsam::NonlinearFactorGraph& newFactors,
-                            const gtsam::Values& newTheta);
-  gtsam::ISAM2Result update(const gtsam::NonlinearFactorGraph& newFactors,
-                            const gtsam::Values& newTheta,
-                            const gtsam::FactorIndices& removeFactorIndices);
-  gtsam::ISAM2Result update(const gtsam::NonlinearFactorGraph& newFactors,
-                            const gtsam::Values& newTheta,
-                            const gtsam::FactorIndices& removeFactorIndices,
-                            const gtsam::KeyGroupMap& constrainedKeys);
-  gtsam::ISAM2Result update(const gtsam::NonlinearFactorGraph& newFactors,
-                            const gtsam::Values& newTheta,
-                            const gtsam::FactorIndices& removeFactorIndices,
-                            const gtsam::KeyGroupMap& constrainedKeys,
-                            const gtsam::KeyList& noRelinKeys);
-  gtsam::ISAM2Result update(const gtsam::NonlinearFactorGraph& newFactors,
-                            const gtsam::Values& newTheta,
-                            const gtsam::FactorIndices& removeFactorIndices,
-                            gtsam::KeyGroupMap& constrainedKeys,
-                            const gtsam::KeyList& noRelinKeys,
-                            const gtsam::KeyList& extraReelimKeys,
-                            bool force_relinearize = false);
+  gtsam::ISAM2Result update(
+      const gtsam::NonlinearFactorGraph& newFactors =
+          gtsam::NonlinearFactorGraph(),
+      const gtsam::Values& newTheta = gtsam::Values(),
+      const gtsam::FactorIndices& removeFactorIndices =
+          gtsam::FactorIndices(),
+      const std::optional<gtsam::KeyGroupMap>& constrainedKeys = std::nullopt,
+      const std::optional<gtsam::KeyList>& noRelinKeys = std::nullopt,
+      const std::optional<gtsam::KeyList>& extraReelimKeys = std::nullopt,
+      bool force_relinearize = false);
 
   gtsam::ISAM2Result update(const gtsam::NonlinearFactorGraph& newFactors,
                             const gtsam::Values& newTheta,
@@ -568,16 +669,19 @@ class ISAM2 {
 
   double error(const gtsam::VectorValues& x) const;
 
-  gtsam::Values getLinearizationPoint() const;
+  const gtsam::Values& getLinearizationPoint() const;
   bool valueExists(gtsam::Key key) const;
   gtsam::Values calculateEstimate() const;
-  template <VALUE = {gtsam::Point2,
+  gtsam::Values calculateEstimate(const gtsam::KeyVector& keys) const;
+  template <VALUE = {double,
+                     gtsam::Point2,
                      gtsam::Rot2,
                      gtsam::Pose2,
                      gtsam::Point3,
                      gtsam::Gal3,
                      gtsam::Rot3,
                      gtsam::Pose3,
+                     gtsam::NavState,
                      gtsam::SL4,
                      gtsam::Similarity2,
                      gtsam::Similarity3,
@@ -603,14 +707,14 @@ class ISAM2 {
   gtsam::JointMarginal jointMarginalInformation(
       const gtsam::KeyVector& queryKeys) const;
   gtsam::Values calculateBestEstimate() const;
-  gtsam::VectorValues getDelta() const;
+  const gtsam::VectorValues& getDelta() const;
   double error(const gtsam::VectorValues& x) const;
-  gtsam::NonlinearFactorGraph getFactorsUnsafe() const;
-  gtsam::VariableIndex getVariableIndex() const;
+  const gtsam::NonlinearFactorGraph& getFactorsUnsafe() const;
+  const gtsam::VariableIndex& getVariableIndex() const;
   const gtsam::KeySet& getFixedVariables() const;
-  gtsam::ISAM2Params params() const;
+  const gtsam::ISAM2Params& params() const;
+  size_t treeNnz() const;
 
-  void printStats() const;
   gtsam::VectorValues gradientAtZero() const;
   std::pair<gtsam::KeySet, bool> predictUpdateInfo(
       const gtsam::NonlinearFactorGraph& newFactors,
@@ -619,8 +723,9 @@ class ISAM2 {
 
   string dot(const gtsam::KeyFormatter& keyFormatter =
                  gtsam::DefaultKeyFormatter) const;
-  void saveGraph(string s, const gtsam::KeyFormatter& keyFormatter =
-                               gtsam::DefaultKeyFormatter) const;
+  void marginalizeLeaves(const gtsam::FastList<gtsam::Key>& leafKeys);
+  std::pair<gtsam::FactorIndices, gtsam::FactorIndices>
+  marginalizeLeavesWithIndices(const gtsam::FastList<gtsam::Key>& leafKeys);
 };
 
 #include <gtsam/nonlinear/NonlinearISAM.h>
@@ -630,7 +735,10 @@ class NonlinearISAM {
   void print(string s = "", const gtsam::KeyFormatter& keyFormatter =
                                 gtsam::DefaultKeyFormatter) const;
   void printStats() const;
-  void saveGraph(string s) const;
+  void saveGraph(
+      const string& s,
+      const gtsam::KeyFormatter& keyFormatter =
+          gtsam::DefaultKeyFormatter) const;
   gtsam::Values estimate() const;
   gtsam::Matrix marginalCovariance(gtsam::Key key) const;
   int reorderInterval() const;
@@ -641,397 +749,8 @@ class NonlinearISAM {
 
   // These might be expensive as instead of a reference the wrapper will make a
   // copy
-  gtsam::GaussianISAM bayesTree() const;
-  gtsam::Values getLinearizationPoint() const;
-  gtsam::NonlinearFactorGraph getFactorsUnsafe() const;
+  const gtsam::GaussianISAM& bayesTree() const;
+  const gtsam::Values& getLinearizationPoint() const;
+  const gtsam::NonlinearFactorGraph& getFactorsUnsafe() const;
 };
-
-//*************************************************************************
-// Continuous-time Gaussian-process factor types
-//*************************************************************************
-#include <gtsam/nonlinear/WnoaStateData.h>
-class StateData {
-  StateData();
-  StateData(gtsam::Key pose_in, gtsam::Key velocity_in, double time_in);
-  gtsam::Key pose;
-  gtsam::Key velocity;
-  double time;
-};
-
-#include <gtsam/nonlinear/WnoaFactor.h>
-template <POSE = {gtsam::Point1, gtsam::Point2, gtsam::Point3, gtsam::Pose2,
-                  gtsam::Pose3}>
-virtual class WnoaMotionFactor : gtsam::NoiseModelFactor {
-  WnoaMotionFactor(const gtsam::StateData& state_k,
-                   const gtsam::StateData& state_kp1,
-                   const gtsam::Vector& q_psd_diag);
-  gtsam::Vector evaluateError(const POSE& p1, const gtsam::Vector& v1,
-                              const POSE& p2, const gtsam::Vector& v2) const;
-};
-
-#include <gtsam/nonlinear/WnoaInterpFactor.h>
-template <POSE = {gtsam::Point1, gtsam::Point2, gtsam::Point3, gtsam::Pose2,
-                  gtsam::Pose3}>
-virtual class WnoaInterpFactor : gtsam::NoiseModelFactor {
-  WnoaInterpFactor(const gtsam::NoiseModelFactor::shared_ptr inner_factor,
-                   const std::set<gtsam::StateData> estimated_states,
-                   const std::set<gtsam::StateData> interp_states,
-                   const gtsam::Vector q_psd_diag,
-                   const bool fixed_noise_model = false,
-                   const bool precomp_interp_mats = true);
-
-  void print(string s = "", const gtsam::KeyFormatter& keyFormatter =
-                                gtsam::DefaultKeyFormatter) const;
-  bool equals(const gtsam::NonlinearFactor& expected, double tol = 1e-9) const;
-  double error(const gtsam::Values& c) const;
-};
-
-// Dummy Wrapper for ExpressionFactorGraph to enable inheritance for
-// WnoaFactorGraph
-#include <gtsam/nonlinear/ExpressionFactorGraph.h>
-virtual class ExpressionFactorGraph : gtsam::NonlinearFactorGraph {};
-
-#include <gtsam/nonlinear/WnoaFactorGraph.h>
-template <POSE = {gtsam::Point1, gtsam::Point2, gtsam::Point3, gtsam::Pose2,
-                  gtsam::Pose3}>
-class WnoaFactorGraph : gtsam::ExpressionFactorGraph {
-  WnoaFactorGraph(
-      std::unordered_map<gtsam::StateData,
-                         std::pair<gtsam::StateData, gtsam::StateData>>
-          interp_map,
-      const gtsam::Vector q_psd_diag, bool fixed_noise_model = false);
-
-  double error(const gtsam::Values& values) const;
-};
-
-template <POSE = {gtsam::Point1, gtsam::Point2, gtsam::Point3, gtsam::Pose2,
-                  gtsam::Pose3}>
-gtsam::NonlinearFactorGraph interpolateFactorGraph(
-    const gtsam::NonlinearFactorGraph& graph,
-    const std::set<gtsam::StateData>& estimated_states,
-    const std::set<gtsam::StateData>& interp_states, gtsam::Vector q_psd_diag,
-    bool fixed_noise = false);
-
-template <POSE = {gtsam::Point1, gtsam::Point2, gtsam::Point3, gtsam::Pose2,
-                  gtsam::Pose3}>
-gtsam::WnoaFactorGraph<POSE> interpolateWnoaFactorGraph(
-    const gtsam::NonlinearFactorGraph& graph,
-    const std::set<gtsam::StateData>& estimated_states,
-    const std::set<gtsam::StateData>& interp_states, gtsam::Vector q_psd_diag,
-    bool fixed_noise = false);
-
-template <POSE = {gtsam::Point1, gtsam::Point2, gtsam::Point3, gtsam::Pose2,
-                  gtsam::Pose3}>
-gtsam::Values updateInterpValues(
-    const gtsam::NonlinearFactorGraph& interp_graph,
-    const gtsam::Values& values, const std::set<gtsam::StateData>& estim_states,
-    const std::set<gtsam::StateData>& interp_states,
-    const gtsam::Vector q_psd_diag);
-
-template <POSE = {gtsam::Point1, gtsam::Point2, gtsam::Point3, gtsam::Pose2,
-                  gtsam::Pose3}>
-std::pair<gtsam::Values, gtsam::InterpCovarianceMap>
-updateInterpValuesWithCovariance(
-    const gtsam::NonlinearFactorGraph& interp_graph,
-    const gtsam::Values& values, const std::set<gtsam::StateData>& estim_states,
-    const std::set<gtsam::StateData>& interp_states,
-    const gtsam::Vector q_psd_diag);
-
-//*************************************************************************
-// Nonlinear factor types
-//*************************************************************************
-#include <gtsam/geometry/ExtendedPose3.h>
-#include <gtsam/nonlinear/PriorFactor.h>
-template <T = {double,
-               gtsam::Vector,
-               gtsam::Point1,
-               gtsam::Vector6,
-               gtsam::Point2,
-               gtsam::StereoPoint2,
-               gtsam::Point3,
-               gtsam::Gal3,
-               gtsam::Se23,
-               gtsam::ExtendedPose3d,
-               gtsam::Rot2,
-               gtsam::SO3,
-               gtsam::SO4,
-               gtsam::SOn,
-               gtsam::SL4,
-               gtsam::Rot3,
-               gtsam::Pose2,
-               gtsam::Pose3,
-               gtsam::Similarity2,
-               gtsam::Similarity3,
-               gtsam::Unit3,
-               gtsam::Cal3_S2,
-               gtsam::Cal3DS2,
-               gtsam::Cal3Bundler,
-               gtsam::Cal3Fisheye,
-               gtsam::Cal3Unified,
-               gtsam::CalibratedCamera,
-               gtsam::PinholeCamera<gtsam::Cal3_S2>,
-               gtsam::PinholeCamera<gtsam::Cal3Bundler>,
-               gtsam::PinholeCamera<gtsam::Cal3Fisheye>,
-               gtsam::PinholeCamera<gtsam::Cal3Unified>,
-               gtsam::SphericalCamera,
-               gtsam::NavState,
-               gtsam::imuBias::ConstantBias}>
-virtual class PriorFactor : gtsam::NoiseModelFactor {
-  PriorFactor(gtsam::Key key, const T& prior,
-              const gtsam::noiseModel::Base* noiseModel = nullptr);
-  T prior() const;
-
-  // enabling serialization functionality
-  void serialize() const;
-};
-
-#include <gtsam/nonlinear/ExtendedPriorFactor.h>
-template <T = {double,
-               gtsam::Vector,
-               gtsam::Point2,
-               gtsam::StereoPoint2,
-               gtsam::Point3,
-               gtsam::Gal3,
-               gtsam::Rot2,
-               gtsam::SO3,
-               gtsam::SO4,
-               gtsam::SOn,
-               gtsam::SL4,
-               gtsam::Rot3,
-               gtsam::Pose2,
-               gtsam::Pose3,
-               gtsam::Similarity2,
-               gtsam::Similarity3,
-               gtsam::Unit3,
-               gtsam::Cal3_S2,
-               gtsam::Cal3DS2,
-               gtsam::Cal3Bundler,
-               gtsam::Cal3Fisheye,
-               gtsam::Cal3Unified,
-               gtsam::CalibratedCamera,
-               gtsam::PinholeCamera<gtsam::Cal3_S2>,
-               gtsam::PinholeCamera<gtsam::Cal3Bundler>,
-               gtsam::PinholeCamera<gtsam::Cal3Fisheye>,
-               gtsam::PinholeCamera<gtsam::Cal3Unified>,
-               gtsam::NavState,
-               gtsam::imuBias::ConstantBias}>
-virtual class ExtendedPriorFactor : gtsam::NoiseModelFactor {
-  ExtendedPriorFactor(gtsam::Key key, const T& origin,
-                      const gtsam::SharedNoiseModel& noiseModel);
-  ExtendedPriorFactor(gtsam::Key key, const T& origin,
-                      const gtsam::Vector& mean,
-                      const gtsam::SharedNoiseModel& noiseModel);
-  ExtendedPriorFactor(gtsam::Key key, const T& origin,
-                      const gtsam::Matrix& covariance);
-  ExtendedPriorFactor(gtsam::Key key, const T& origin,
-                      const gtsam::Vector& mean,
-                      const gtsam::Matrix& covariance);
-  T origin() const;
-  // Optional tangent space mean (may be empty / None)
-  std::optional<gtsam::Vector> mean() const;
-  std::optional<gtsam::Matrix> covariance() const;
-  std::optional<std::pair<gtsam::Matrix, gtsam::Matrix>> gaussian() const;
-
-  // T-versions (vs. values)
-  double error(const T& x) const;
-  double likelihood(const T& x) const;
-  gtsam::Vector evaluateError(const T& x) const;
-
-  // enabling serialization functionality
-  void serialize() const;
-};
-
-#include <gtsam/nonlinear/ConcentratedGaussian.h>
-template <T = {double, gtsam::Vector, gtsam::Point2, gtsam::StereoPoint2,
-               gtsam::Point3, gtsam::Gal3, gtsam::Rot2, gtsam::SO3, gtsam::SO4,
-               gtsam::SOn, gtsam::SL4, gtsam::Rot3, gtsam::Pose2, gtsam::Pose3,
-               gtsam::Similarity2, gtsam::Similarity3}>
-virtual class ConcentratedGaussian : gtsam::ExtendedPriorFactor<T> {
-  ConcentratedGaussian();
-  // Constructors mirroring header (origin terminology)
-  ConcentratedGaussian(
-      gtsam::Key key, const T& origin,
-      const gtsam::noiseModel::Gaussian::shared_ptr& noiseModel);
-  ConcentratedGaussian(
-      gtsam::Key key, const T& origin, const gtsam::Vector& mean,
-      const gtsam::noiseModel::Gaussian::shared_ptr& noiseModel);
-  ConcentratedGaussian(gtsam::Key key, const T& origin,
-                       const gtsam::Matrix& covariance);
-  ConcentratedGaussian(gtsam::Key key, const T& origin,
-                       const gtsam::Vector& mean,
-                       const gtsam::Matrix& covariance);
-  // Return element corresponding to mean (no Jacobian variant)
-  T retractMean() const;
-  // Normalization constant (negative log) and log-probability helpers
-  double negLogConstant() const;
-  double logProbability(const T& x) const;
-  double logProbability(const gtsam::Values& values) const;
-  double evaluate(const T& x) const;
-  double evaluate(const gtsam::Values& values) const;
-  // Chart transport / reset operations
-  This reset() const;
-  This transportTo(const T& x_hat) const;
-  // Fusion operator
-  This operator*(const This& other) const;
-};
-
-#include <gtsam/nonlinear/NonlinearEquality.h>
-template <T = {gtsam::Point2,
-               gtsam::StereoPoint2,
-               gtsam::Point3,
-               gtsam::Rot2,
-               gtsam::SO3,
-               gtsam::SO4,
-               gtsam::SOn,
-               gtsam::SL4,
-               gtsam::Rot3,
-               gtsam::Pose2,
-               gtsam::Gal3,
-               gtsam::Pose3,
-               gtsam::Similarity2,
-               gtsam::Similarity3,
-               gtsam::Cal3_S2,
-               gtsam::CalibratedCamera,
-               gtsam::PinholeCamera<gtsam::Cal3_S2>,
-               gtsam::PinholeCamera<gtsam::Cal3Bundler>,
-               gtsam::PinholeCamera<gtsam::Cal3Fisheye>,
-               gtsam::PinholeCamera<gtsam::Cal3Unified>,
-               gtsam::SphericalCamera,
-               gtsam::imuBias::ConstantBias}>
-virtual class NonlinearEquality : gtsam::NoiseModelFactor {
-  // Constructor - forces exact evaluation
-  NonlinearEquality(size_t j, const T& feasible);
-  // Constructor - allows inexact evaluation
-  NonlinearEquality(size_t j, const T& feasible, double error_gain);
-
-  // enabling serialization functionality
-  void serialize() const;
-};
-
-template <T = {gtsam::Point2,
-               gtsam::StereoPoint2,
-               gtsam::Point3,
-               gtsam::Rot2,
-               gtsam::Gal3,
-               gtsam::SO3,
-               gtsam::SO4,
-               gtsam::SOn,
-               gtsam::SL4,
-               gtsam::Rot3,
-               gtsam::Pose2,
-               gtsam::Pose3,
-               gtsam::Similarity2,
-               gtsam::Similarity3,
-               gtsam::Cal3_S2,
-               gtsam::CalibratedCamera,
-               gtsam::PinholeCamera<gtsam::Cal3_S2>,
-               gtsam::PinholeCamera<gtsam::Cal3Bundler>,
-               gtsam::PinholeCamera<gtsam::Cal3Fisheye>,
-               gtsam::PinholeCamera<gtsam::Cal3Unified>,
-               gtsam::imuBias::ConstantBias}>
-virtual class NonlinearEquality2 : gtsam::NoiseModelFactor {
-  NonlinearEquality2(gtsam::Key key1, gtsam::Key key2, double mu = 1e4);
-  gtsam::Vector evaluateError(const T& x1, const T& x2);
-};
-
-#include <gtsam/nonlinear/FixedLagSmoother.h>
-// This class is not available in python, just use a dictionary
-class FixedLagSmootherKeyTimestampMapValue {
-  FixedLagSmootherKeyTimestampMapValue(gtsam::Key key, double timestamp);
-  FixedLagSmootherKeyTimestampMapValue(
-      const gtsam::FixedLagSmootherKeyTimestampMapValue& other);
-};
-
-// This class is not available in python, just use a dictionary
-class FixedLagSmootherKeyTimestampMap {
-  FixedLagSmootherKeyTimestampMap();
-  FixedLagSmootherKeyTimestampMap(
-      const gtsam::FixedLagSmootherKeyTimestampMap& other);
-
-  // common STL methods
-  size_t size() const;
-  bool empty() const;
-  void clear();
-
-  double at(const gtsam::Key key) const;
-  void insert(const gtsam::FixedLagSmootherKeyTimestampMapValue& value);
-};
-
-class FixedLagSmootherResult {
-  size_t getIterations() const;
-  size_t getNonlinearVariables() const;
-  size_t getLinearVariables() const;
-  double getError() const;
-};
-
-virtual class FixedLagSmoother {
-  void print(string s) const;
-  bool equals(const gtsam::FixedLagSmoother& rhs, double tol) const;
-
-  gtsam::FixedLagSmootherKeyTimestampMap timestamps() const;
-  double smootherLag() const;
-
-  gtsam::FixedLagSmootherResult update(
-      const gtsam::NonlinearFactorGraph& newFactors,
-      const gtsam::Values& newTheta,
-      const gtsam::FixedLagSmootherKeyTimestampMap& timestamps);
-  gtsam::FixedLagSmootherResult update(
-      const gtsam::NonlinearFactorGraph& newFactors,
-      const gtsam::Values& newTheta,
-      const gtsam::FixedLagSmootherKeyTimestampMap& timestamps,
-      const gtsam::FactorIndices& factorsToRemove);
-  gtsam::Values calculateEstimate() const;
-};
-
-#include <gtsam/nonlinear/BatchFixedLagSmoother.h>
-virtual class BatchFixedLagSmoother : gtsam::FixedLagSmoother {
-  BatchFixedLagSmoother();
-  BatchFixedLagSmoother(double smootherLag);
-  BatchFixedLagSmoother(double smootherLag,
-                        const gtsam::LevenbergMarquardtParams& parameters);
-
-  void print(string s = "BatchFixedLagSmoother:\n") const;
-
-  gtsam::LevenbergMarquardtParams params() const;
-
-  gtsam::NonlinearFactorGraph getFactors() const;
-
-  template <VALUE = {gtsam::Point2, gtsam::Rot2, gtsam::Pose2, gtsam::Point3,
-                     gtsam::Rot3, gtsam::Pose3, gtsam::SL4, gtsam::Similarity2,
-                     gtsam::Similarity3, gtsam::Cal3_S2, gtsam::Cal3DS2,
-                     gtsam::Vector, gtsam::Matrix}>
-  VALUE calculateEstimate(gtsam::Key key) const;
-};
-
-#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
-virtual class IncrementalFixedLagSmoother : gtsam::FixedLagSmoother {
-  IncrementalFixedLagSmoother();
-  IncrementalFixedLagSmoother(double smootherLag);
-  IncrementalFixedLagSmoother(double smootherLag,
-                              const gtsam::ISAM2Params& parameters);
-
-  void print(string s = "IncrementalFixedLagSmoother:\n") const;
-
-  gtsam::Matrix marginalCovariance(gtsam::Key key) const;
-  gtsam::ISAM2Params params() const;
-
-  gtsam::NonlinearFactorGraph getFactors() const;
-  gtsam::ISAM2 getISAM2() const;
-};
-
-#include <gtsam/nonlinear/ExtendedKalmanFilter.h>
-template <T = {gtsam::Point2, gtsam::Point3, gtsam::Rot2, gtsam::Rot3,
-               gtsam::Pose2, gtsam::Pose3, gtsam::Gal3, gtsam::SL4,
-               gtsam::Similarity2, gtsam::Similarity3, gtsam::NavState,
-               gtsam::imuBias::ConstantBias}>
-virtual class ExtendedKalmanFilter {
-  ExtendedKalmanFilter(gtsam::Key key_initial, const T& x_initial,
-                       const gtsam::noiseModel::Gaussian* P_initial);
-
-  T predict(const gtsam::NoiseModelFactor& motionFactor);
-  T update(const gtsam::NoiseModelFactor& measurementFactor);
-
-  gtsam::JacobianFactor::shared_ptr Density() const;
-};
-
 }  // namespace gtsam

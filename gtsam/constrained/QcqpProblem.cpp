@@ -20,6 +20,35 @@
 namespace gtsam {
 
 /* ************************************************************************* */
+QcqpProblem::QcqpProblem(const NonlinearFactorGraph& graph,
+                         size_t columnDimension,
+                         bool useRedundantConstraints) {
+  if (columnDimension == 0) {
+    throw std::invalid_argument(
+        "QcqpProblem: columnDimension must be positive.");
+  }
+
+  QcqpVariableConstraints variableConstraints;
+  QcqpVariableConstraints redundantConstraints;
+  for (const auto& factor : graph) {
+    if (!factor) continue;
+
+    factor->qcqpFactors(costs_, eqConstraints_, variableConstraints,
+                        columnDimension);
+    if (useRedundantConstraints) {
+      const auto* provider =
+          dynamic_cast<const RedundantQcqpProvider*>(factor.get());
+      if (provider) {
+        provider->appendRedundantConstraints(columnDimension,
+                                              redundantConstraints);
+      }
+    }
+  }
+  eqConstraints_.add(variableConstraints.constraints());
+  eqConstraints_.add(redundantConstraints.constraints());
+}
+
+/* ************************************************************************* */
 void QcqpProblem::addConstraint(const LinearConstraint& constraint) {
   if (constraint.isEquality()) {
     eqConstraints_.push_back(constraint.createEqualityFactor());

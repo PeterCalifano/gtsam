@@ -18,11 +18,12 @@
 
 #pragma once
 
+#include <gtsam/base/Manifold.h>
+#include <gtsam/base/MatrixConstants.h>
+#include <gtsam/base/Vector.h>
 #include <gtsam/geometry/BearingRange.h>
 #include <gtsam/geometry/ExtendedPose3.h>
 #include <gtsam/geometry/Pose3.h>
-#include <gtsam/base/Vector.h>
-#include <gtsam/base/Manifold.h>
 
 #if GTSAM_ENABLE_BOOST_SERIALIZATION
 #include <boost/serialization/base_object.hpp>
@@ -58,9 +59,7 @@ public:
 
   /// Construct from attitude, position, velocity
   NavState(const Rot3& R, const Point3& t, const Velocity3& v)
-      : Base(R, (Eigen::Matrix<double, 3, 2>() << t.x(), v.x(), t.y(), v.y(),
-                 t.z(), v.z())
-                    .finished()) {}
+      : Base(R, Matrix32{{t.x(), v.x()}, {t.y(), v.y()}, {t.z(), v.z()}}) {}
 
   /// Construct from pose and velocity
   NavState(const Pose3& pose, const Velocity3& v)
@@ -180,20 +179,15 @@ public:
   }
 
   /**
-   * Manifold retract used by optimization.
-   * This intentionally uses a component-wise chart (R via Expmap, and p/v via
-   * world-frame rotation of the tangent increments), not the default LieGroup
-   * chart based on full Expmap/Logmap.
+   * Manifold retract used by optimization. The compile-time option
+   * GTSAM_NAVSTATE_EXPMAP selects the full Lie Expmap; otherwise this uses the
+   * component-wise chart.
    */
   NavState retract(const Vector9& v, //
       OptionalJacobian<9, 9> H1 = {}, OptionalJacobian<9, 9> H2 =
           {}) const;
 
-  /**
-   * Inverse of the custom manifold chart used by retract.
-   * Kept consistent with retract for optimization; Lie expmap/logmap remain
-   * available separately for group operations.
-   */
+  /// Inverse of the optimization chart selected by GTSAM_NAVSTATE_EXPMAP.
   Vector9 localCoordinates(const NavState& g, //
       OptionalJacobian<9, 9> H1 = {}, OptionalJacobian<9, 9> H2 =
           {}) const;
@@ -211,7 +205,7 @@ public:
   struct AutonomousFlow {
     double dt;
 
-    // Differential at identity (right-trivialized): Φ = I with ∂p/∂v = dt·I.
+    // Differential at identity: Φ = I with ∂p/∂v = dt·I.
     Jacobian dIdentity() const {
       Jacobian Phi = I_9x9;
       Phi.template block<3, 3>(3, 6) = I_3x3 * dt;
@@ -231,16 +225,35 @@ public:
                   OptionalJacobian<9, 3> G1 = {},
                   OptionalJacobian<9, 3> G2 = {}) const;
 
-  /// Compute tangent space contribution due to Coriolis forces
-  Vector9 coriolis(double dt, const Vector3& omega, bool secondOrder = false,
-      OptionalJacobian<9, 9> H = {}) const;
+  // Return the predicted state directly, avoiding a local/retract round-trip.
+  NavState predictPIM(const Vector9& pim, double dt,
+                      const Vector3& n_gravity,
+                      const std::optional<Vector3>& omegaCoriolis,
+                      OptionalJacobian<9, 9> H1 = {},
+                      OptionalJacobian<9, 9> H2 = {},
+                      OptionalJacobian<9, 3> H3 = {}) const;
 
-  /// Correct preintegrated tangent vector with our velocity and rotated gravity,
-  /// taking into account Coriolis forces if omegaCoriolis is given.
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
+  /**
+   * Compute the legacy approximate tangent-space Coriolis contribution.
+   * @deprecated Configure omegaCoriolis and use a concrete PIM's predict()
+   * method for exact rotating-frame dynamics.
+   */
+  Vector9 coriolis(double dt, const Vector3& omega, bool secondOrder = false,
+                   OptionalJacobian<9, 9> H = {}) const;
+
+  /**
+   * Correct a preintegrated tangent vector using the initial state and gravity.
+   * @deprecated Use a concrete PIM's predict() method, which returns the
+   * predicted NavState directly and supports exact rotating-frame dynamics.
+   */
   Vector9 correctPIM(const Vector9& pim, double dt, const Vector3& n_gravity,
-      const std::optional<Vector3>& omegaCoriolis, bool use2ndOrderCoriolis =
-          false, OptionalJacobian<9, 9> H1 = {},
-      OptionalJacobian<9, 9> H2 = {}) const;
+                     const std::optional<Vector3>& omegaCoriolis,
+                     bool use2ndOrderCoriolis = false,
+                     OptionalJacobian<9, 9> H1 = {},
+                     OptionalJacobian<9, 9> H2 = {},
+                     OptionalJacobian<9, 3> H3 = {}) const;
+#endif
 
   /// @}
 
@@ -257,7 +270,21 @@ private:
   /// @}
 };
 
-// Specialize NavState traits to use a Retract/Local that agrees with IMUFactors
+namespace internal {
+
+/** Component-wise NavState retraction independent of the optimization chart. */
+GTSAM_EXPORT NavState navStateComponentWiseRetract(
+    const NavState& state, const Vector9& v,
+    OptionalJacobian<9, 9> H1 = {}, OptionalJacobian<9, 9> H2 = {});
+
+/** Component-wise NavState local coordinates independent of optimization. */
+GTSAM_EXPORT Vector9 navStateComponentWiseLocalCoordinates(
+    const NavState& state, const NavState& other,
+    OptionalJacobian<9, 9> H1 = {}, OptionalJacobian<9, 9> H2 = {});
+
+}  // namespace internal
+
+// Specialize NavState traits to use the configured optimization chart.
 template <>
 struct traits<NavState> : public internal::MatrixLieGroup<NavState, 5> {};
 

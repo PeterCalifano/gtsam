@@ -55,8 +55,6 @@ using Matrix6##N = Eigen::Matrix<double, 6, N>;  \
 using Matrix7##N = Eigen::Matrix<double, 7, N>;  \
 using Matrix8##N = Eigen::Matrix<double, 8, N>;  \
 using Matrix9##N = Eigen::Matrix<double, 9, N>;  \
-static const Eigen::MatrixBase<Matrix##N>::IdentityReturnType I_##N##x##N = Matrix##N::Identity(); \
-static const Eigen::MatrixBase<Matrix##N>::ConstantReturnType Z_##N##x##N = Matrix##N::Constant(0.0);
 
 GTSAM_MAKE_MATRIX_DEFS(1)
 GTSAM_MAKE_MATRIX_DEFS(2)
@@ -135,13 +133,6 @@ GTSAM_EXPORT bool linear_independent(const Matrix& A, const Matrix& B, double to
  */
 GTSAM_EXPORT bool linear_dependent(const Matrix& A, const Matrix& B, double tol = 1e-9);
 
-/** products using old-style format to improve compatibility */
-template<class MATRIX>
-inline MATRIX prod(const MATRIX& A, const MATRIX&B) {
-  MATRIX result = A * B;
-  return result;
-}
-
 /**
  * print without optional string, must specify cout yourself
  */
@@ -164,21 +155,7 @@ GTSAM_EXPORT void save(const Matrix& A, const std::string &s, const std::string&
  */
 GTSAM_EXPORT std::istream& operator>>(std::istream& inputStream, Matrix& destinationMatrix);
 
-/**
- * extract submatrix, slice semantics, i.e. range = [i1,i2[ excluding i2
- * @param A matrix
- * @param i1 first row index
- * @param i2 last  row index + 1
- * @param j1 first col index
- * @param j2 last  col index + 1
- * @return submatrix A(i1:i2-1,j1:j2-1)
- */
-template<class MATRIX>
-Eigen::Block<const MATRIX> sub(const MATRIX& A, size_t i1, size_t i2, size_t j1, size_t j2) {
-  size_t m=i2-i1, n=j2-j1;
-  return A.block(i1,j1,m,n);
-}
-
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /**
  * insert a submatrix IN PLACE at a specified location in a larger matrix
  * NOTE: there is no size checking
@@ -186,86 +163,29 @@ Eigen::Block<const MATRIX> sub(const MATRIX& A, size_t i1, size_t i2, size_t j1,
  * @param subMatrix matrix to be inserted
  * @param i is the row of the upper left corner insert location
  * @param j is the column of the upper left corner insert location
+ * @deprecated Since GTSAM 4.3, assign directly to
+ * `fullMatrix.block(i, j, subMatrix.rows(), subMatrix.cols())`.
  */
 template <typename Derived1, typename Derived2>
-void insertSub(Eigen::MatrixBase<Derived1>& fullMatrix, const Eigen::MatrixBase<Derived2>& subMatrix, size_t i, size_t j) {
+void insertSub(Eigen::MatrixBase<Derived1>& fullMatrix,
+               const Eigen::MatrixBase<Derived2>& subMatrix, size_t i,
+               size_t j) {
   fullMatrix.block(i, j, subMatrix.rows(), subMatrix.cols()) = subMatrix;
 }
+#endif
 
 /**
  * Create a matrix with submatrices along its diagonal
  */
 GTSAM_EXPORT Matrix diag(const std::vector<Matrix>& Hs);
 
-/**
- * Extracts a column view from a matrix that avoids a copy
- * @param A matrix to extract column from
- * @param j index of the column
- * @return a const view of the matrix
- */
-template<class MATRIX>
-const typename MATRIX::ConstColXpr column(const MATRIX& A, size_t j) {
-  return A.col(j);
-}
-
-/**
- * Extracts a row view from a matrix that avoids a copy
- * @param A matrix to extract row from
- * @param j index of the row
- * @return a const view of the matrix
- */
-template<class MATRIX>
-const typename MATRIX::ConstRowXpr row(const MATRIX& A, size_t j) {
-  return A.row(j);
-}
-
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /**
  * static transpose function, just calls Eigen transpose member function
+ * @deprecated Since GTSAM 4.3, use `A.transpose()`.
  */
 inline Matrix trans(const Matrix& A) { return A.transpose(); }
-
-/// Reshape functor
-template <int OutM, int OutN, int OutOptions, int InM, int InN, int InOptions>
-struct Reshape {
-  //TODO replace this with Eigen's reshape function as soon as available. (There is a PR already pending : https://bitbucket.org/eigen/eigen/pull-request/41/reshape/diff)
-  typedef Eigen::Map<const Eigen::Matrix<double, OutM, OutN, OutOptions> > ReshapedType;
-  static inline ReshapedType reshape(const Eigen::Matrix<double, InM, InN, InOptions> & in) {
-    return in.data();
-  }
-};
-
-/// Reshape specialization that does nothing as shape stays the same (needed to not be ambiguous for square input equals square output)
-template <int M, int InOptions>
-struct Reshape<M, M, InOptions, M, M, InOptions> {
-  typedef const Eigen::Matrix<double, M, M, InOptions> & ReshapedType;
-  static inline ReshapedType reshape(const Eigen::Matrix<double, M, M, InOptions> & in) {
-    return in;
-  }
-};
-
-/// Reshape specialization that does nothing as shape stays the same
-template <int M, int N, int InOptions>
-struct Reshape<M, N, InOptions, M, N, InOptions> {
-  typedef const Eigen::Matrix<double, M, N, InOptions> & ReshapedType;
-  static inline ReshapedType reshape(const Eigen::Matrix<double, M, N, InOptions> & in) {
-    return in;
-  }
-};
-
-/// Reshape specialization that does transpose
-template <int M, int N, int InOptions>
-struct Reshape<N, M, InOptions, M, N, InOptions> {
-  typedef typename Eigen::Matrix<double, M, N, InOptions>::ConstTransposeReturnType ReshapedType;
-  static inline ReshapedType reshape(const Eigen::Matrix<double, M, N, InOptions> & in) {
-    return in.transpose();
-  }
-};
-
-template <int OutM, int OutN, int OutOptions, int InM, int InN, int InOptions>
-inline typename Reshape<OutM, OutN, OutOptions, InM, InN, InOptions>::ReshapedType reshape(const Eigen::Matrix<double, InM, InN, InOptions> & m){
-  static_assert(InM * InN == OutM * OutN);
-  return Reshape<OutM, OutN, OutOptions, InM, InN, InOptions>::reshape(m);
-}
+#endif
 
 /**
  * QR factorization, inefficient, best use imperative householder below
@@ -310,14 +230,19 @@ GTSAM_EXPORT void householder_(Matrix& A, size_t k, bool copy_vectors=true);
  */
 GTSAM_EXPORT void householder(Matrix& A, size_t k);
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /**
  * backSubstitute U*x=b
  * @param U an upper triangular matrix
  * @param b an RHS vector
  * @param unit, set true if unit triangular
  * @return the solution x of U*x=b
+ * @deprecated Since GTSAM 4.3, use
+ * `U.triangularView<Eigen::Upper>().solve(b)`, or `Eigen::UnitUpper`
+ * when `unit` is true.
  */
-GTSAM_EXPORT Vector backSubstituteUpper(const Matrix& U, const Vector& b, bool unit=false);
+GTSAM_EXPORT Vector backSubstituteUpper(const Matrix& U, const Vector& b,
+                                        bool unit = false);
 
 /**
  * backSubstitute x'*U=b'
@@ -325,9 +250,12 @@ GTSAM_EXPORT Vector backSubstituteUpper(const Matrix& U, const Vector& b, bool u
  * @param b an RHS vector
  * @param unit, set true if unit triangular
  * @return the solution x of x'*U=b'
+ * @deprecated Since GTSAM 4.3, use
+ * `U.triangularView<Eigen::Upper>().transpose().solve<Eigen::OnTheLeft>(b)`,
+ * or `Eigen::UnitUpper` when `unit` is true.
  */
-//TODO: is this function necessary? it isn't used
-GTSAM_EXPORT Vector backSubstituteUpper(const Vector& b, const Matrix& U, bool unit=false);
+GTSAM_EXPORT Vector backSubstituteUpper(const Vector& b, const Matrix& U,
+                                        bool unit = false);
 
 /**
  * backSubstitute L*x=b
@@ -335,16 +263,40 @@ GTSAM_EXPORT Vector backSubstituteUpper(const Vector& b, const Matrix& U, bool u
  * @param b an RHS vector
  * @param unit, set true if unit triangular
  * @return the solution x of L*x=b
+ * @deprecated Since GTSAM 4.3, use
+ * `L.triangularView<Eigen::Lower>().solve(b)`, or `Eigen::UnitLower`
+ * when `unit` is true.
  */
-GTSAM_EXPORT Vector backSubstituteLower(const Matrix& L, const Vector& b, bool unit=false);
+GTSAM_EXPORT Vector backSubstituteLower(const Matrix& L, const Vector& b,
+                                        bool unit = false);
+#endif
 
+namespace internal {
+
+/** Solve the block upper-triangular system R*x = d - S*parents. */
+template <class RDerived, class SDerived, class DDerived, class ParentsDerived>
+void solveUpperConditional(const Eigen::MatrixBase<RDerived>& R,
+                           const Eigen::MatrixBase<SDerived>& S,
+                           const Eigen::MatrixBase<DDerived>& d,
+                           const Eigen::MatrixBase<ParentsDerived>& parents,
+                           Vector* result) {
+  result->resize(d.rows());
+  result->noalias() = d - S * parents;
+  R.derived().template triangularView<Eigen::Upper>().solveInPlace(*result);
+}
+
+}  // namespace internal
+
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /**
  * create a matrix by stacking other matrices
  * Given a set of matrices: A1, A2, A3...
  * @param ... pointers to matrices to be stacked
  * @return combined matrix [A1; A2; A3]
+ * @deprecated Since GTSAM 4.3, use `stack(const std::vector<Matrix>&)`.
  */
 GTSAM_EXPORT Matrix stack(size_t nrMatrices, ...);
+#endif
 GTSAM_EXPORT Matrix stack(const std::vector<Matrix>& blocks);
 
 /**
@@ -357,18 +309,47 @@ GTSAM_EXPORT Matrix stack(const std::vector<Matrix>& blocks);
  * @param n is the number of columns of a single matrix
  * @return combined matrix [A1 A2 A3]
  */
-GTSAM_EXPORT Matrix collect(const std::vector<const Matrix *>& matrices, size_t m = 0, size_t n = 0);
+GTSAM_EXPORT Matrix collect(const std::vector<const Matrix*>& matrices,
+                            size_t m = 0, size_t n = 0);
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
+/** @deprecated Since GTSAM 4.3, use the `std::vector` overload. */
 GTSAM_EXPORT Matrix collect(size_t nrMatrices, ...);
+#endif
+
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
+/**
+ * Scales matrix rows in place by the values in a vector.
+ * @param inf_mask when true, will not scale with a NaN or inf value.
+ * @deprecated Since GTSAM 4.3, use
+ * `A.array().colwise() *= v.array()`. For `inf_mask`, first replace
+ * non-finite scale values with 1 using
+ * `v.array().isFinite().select(v.array(), 1.0)`.
+ */
+GTSAM_EXPORT void vector_scale_inplace(const Vector& v, Matrix& A,
+                                       bool inf_mask = false);
 
 /**
- * scales a matrix row or column by the values in a vector
- * Arguments (Matrix, Vector) scales the columns,
- * (Vector, Matrix) scales the rows
+ * Returns a matrix with rows scaled by the values in a vector.
  * @param inf_mask when true, will not scale with a NaN or inf value.
+ * @deprecated Since GTSAM 4.3, use
+ * `(A.array().colwise() * v.array()).matrix()`. For `inf_mask`, first
+ * replace non-finite scale values with 1 using
+ * `v.array().isFinite().select(v.array(), 1.0)`.
  */
-GTSAM_EXPORT void vector_scale_inplace(const Vector& v, Matrix& A, bool inf_mask = false); // row
-GTSAM_EXPORT Matrix vector_scale(const Vector& v, const Matrix& A, bool inf_mask = false); // row
-GTSAM_EXPORT Matrix vector_scale(const Matrix& A, const Vector& v, bool inf_mask = false); // column
+GTSAM_EXPORT Matrix vector_scale(const Vector& v, const Matrix& A,
+                                 bool inf_mask = false);
+
+/**
+ * Returns a matrix with columns scaled by the values in a vector.
+ * @param inf_mask when true, will not scale with a NaN or inf value.
+ * @deprecated Since GTSAM 4.3, use
+ * `(A.array().rowwise() * v.transpose().array()).matrix()`. For
+ * `inf_mask`, first replace non-finite scale values with 1 using
+ * `v.array().isFinite().select(v.array(), 1.0)`.
+ */
+GTSAM_EXPORT Matrix vector_scale(const Matrix& A, const Vector& v,
+                                 bool inf_mask = false);
+#endif
 
 /**
  * skew symmetric matrix returns this:
@@ -382,7 +363,7 @@ GTSAM_EXPORT Matrix vector_scale(const Matrix& A, const Vector& v, bool inf_mask
 */
 
 inline Matrix3 skewSymmetric(double wx, double wy, double wz) {
-  return (Matrix3() << 0.0, -wz, +wy, +wz, 0.0, -wx, -wy, +wx, 0.0).finished();
+  return Matrix3{{0.0, -wz, +wy}, {+wz, 0.0, -wx}, {-wy, +wx, 0.0}};
 }
 
 template <class Derived>
@@ -393,8 +374,14 @@ inline Matrix3 skewSymmetric(const Eigen::MatrixBase<Derived>& w) {
 /** Use Cholesky to calculate inverse square root of a matrix */
 GTSAM_EXPORT Matrix inverse_square_root(const Matrix& A);
 
-/** Return the inverse of a S.P.D. matrix.  Inversion is done via Cholesky decomposition. */
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
+/**
+ * Return the inverse of a S.P.D. matrix using Cholesky decomposition.
+ * @deprecated Since GTSAM 4.3, use
+ * `A.llt().solve(Matrix::Identity(A.rows(), A.cols()))`.
+ */
 GTSAM_EXPORT Matrix cholesky_inverse(const Matrix &A);
+#endif
 
 /**
  * SVD computes economy SVD A=U*S*V'
@@ -498,9 +485,17 @@ struct MultiplyWithInverseFunction {
   const Operator phi_;
 };
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
+/** @deprecated Since GTSAM 4.3, use `Matrix(A.llt().matrixL())`. */
 GTSAM_EXPORT Matrix LLt(const Matrix& A);
 
+/** @deprecated Since GTSAM 4.3, use `Matrix(A.llt().matrixU())`. */
 GTSAM_EXPORT Matrix RtR(const Matrix& A);
 
+/**
+ * @deprecated Since GTSAM 4.3, use
+ * `A.colwise().squaredNorm().transpose()`.
+ */
 GTSAM_EXPORT Vector columnNormSquare(const Matrix &A);
+#endif
 }  // namespace gtsam

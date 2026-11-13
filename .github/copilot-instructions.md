@@ -1,40 +1,305 @@
-For reviewing PRs:
-* All functions in header files should have doxygen-style API docs, /** */ style, except small functions like getters which can have single line /// comments, no need for @brief, @params etc
-* Use /// for single-line comments rather than /** */
-* Use meaningful variable names, e.g. `measurement` not `msm`, avoid abbreviations.
-* Flag overly complex or long/functions: break up in smaller functions
-* On Windows it is necessary to explicitly export all functions from the library which should be externally accessible. To do this, include the macro `GTSAM_EXPORT` in your class or function definition.
-* When adding or modifying public classes/methods, always review and follow `Using-GTSAM-EXPORT.md` before finalizing changes, including template specialization/export rules.
-* If we add a C++ function to a `.i` file to expose it to the wrapper, we must ensure that the parameter names match exactly between the declaration in the header file and the declaration in the `.i`. Similarly, if we change any parameter names in a wrapped function in a header file, or change any parameter names in a `.i` file, we must change the corresponding function in the other file to reflect those changes.
-* For templated classes/factors in wrappers, prefer the normal `.i` template mechanism over hand-writing one wrapper class per instantiation. Let the wrapper generate names such as `AttitudeFactorRot3` from `template<...> class AttitudeFactor`.
-* Do not add or keep C++ `using`/`typedef` aliases solely to manufacture wrapper names. Only keep aliases when they are genuinely useful in the C++ API as well.
-* The top-level `wrap/` directory is a git subtree of `borglab/wrap`, not a submodule. The official way to pull in new upstream versions is `./update_wrap.sh` from the GTSAM repo root, optionally passing a branch or tag as the first argument; it defaults to `master`. This creates GTSAM commits, typically a squash plus a merge commit, so do it on a feature branch and open a PR rather than pushing directly to `master` or `develop`. Make code contributions to wrap in the `borglab/wrap` repository.
-* Classes are Uppercase, methods and functions lowerMixedCase.
-* Public fields in structs keep plain names (no trailing underscore).
-* Apart from those naming conventions, we adopt Google C++ style.
-* Prefer concise, elegant examples: use the fewest helpers possible, favor direct construction and small local functors/lambdas over extra adapter functions.
-* In C++ tests, avoid one large anonymous namespace collecting every helper at the top of the file. Prefer small, named fixture-style namespaces that contain both the helper definitions and the tests that use them, so helpers stay local to the relevant test group and the file can evolve toward fixture classes later.
-* In C++ tests, put at least one short `//` comment immediately above each `TEST()` explaining the behavior being verified.
-* When using `/* ************************************************************************* */` dividers in tests, use one divider immediately before each fixture namespace and one divider immediately after it closes. Do not put dividers between tests that belong to the same fixture block. The preferred shape is:
-  ```
+# GTSAM repository guidance
+
+GTSAM is a C++17 library for factor graphs and sensor fusion, with Python and
+MATLAB wrappers. Follow the existing code near your change and keep changes
+focused.
+
+When fixing additional build problems discovered during a task, establish the
+concrete failure and explain why each fix is necessary. Keep independently
+useful API or infrastructure redesigns in separate PRs.
+
+## Public C++ APIs
+
+* All functions in header files should have Doxygen-style API documentation
+  using `/** */`, except small functions such as getters, which can use a
+  single-line `///` comment. There is no need for `@brief`, `@param`, or similar
+  tags when the prose is already clear.
+* Use `///` for single-line documentation comments rather than `/** */`.
+* Use meaningful variable names, for example `measurement` rather than `msm`;
+  avoid abbreviations.
+* On Windows, externally accessible library APIs must be explicitly exported.
+  When adding or modifying public classes or functions, review and follow
+  [`Using-GTSAM-EXPORT.md`](../Using-GTSAM-EXPORT.md), including its template
+  specialization and header-only rules.
+
+### Deprecating C++ APIs
+
+* Use GTSAM's versioned deprecation mechanism rather than adding a standalone
+  `[[deprecated]]` attribute. For APIs deprecated since GTSAM 4.3, wrap their
+  declarations, definitions, and any tests in
+  `#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43`.
+* Add a Doxygen `@deprecated` comment that names the supported replacement or
+  migration path.
+* Verify the normal configuration with deprecated APIs disabled. When changing
+  compatibility code itself, also verify a build with the corresponding
+  `GTSAM_ALLOW_DEPRECATED_SINCE_*` option enabled.
+
+### Moving functionality between directories
+
+* When relocating functionality between directories, move every associated
+  `.h` and `.cpp` file with `git mv`. This applies both to promotions from
+  `gtsam_unstable/` to `gtsam/` and to moves between directories within
+  `gtsam/`; do not copy the implementation to its destination while modifying
+  the original headers in place.
+* When an old include path must remain available for backward compatibility,
+  first move the original header to its canonical destination with `git mv`,
+  then add a new forwarding header at the old path. Keep forwarding headers
+  minimal: document the replacement, apply the appropriate versioned
+  deprecation guard, and include the canonical header.
+* Update build manifests, internal includes, tests, wrappers, and documentation
+  to use the canonical destination. The old path should remain only as the
+  compatibility surface.
+* When moving classes, also move their corresponding notebooks from the old
+  `doc/` directory to the destination's `doc/` directory with `git mv`. Update
+  the relevant documentation indices so they list and link to the notebooks at
+  their canonical locations. Review path-dependent links inside each moved
+  notebook as well: in particular, update its "Open in Colab" button and links
+  to source files when their targets changed.
+* Review export directives whenever a move changes the library that owns the
+  functionality. Use the destination library's export macro consistently on
+  public declarations and any exported definitions; for example, replace
+  `GTSAM_UNSTABLE_EXPORT` with `GTSAM_EXPORT` when promoting functionality from
+  `gtsam_unstable/` into `gtsam/`. Follow
+  [`Using-GTSAM-EXPORT.md`](../Using-GTSAM-EXPORT.md) for the applicable
+  platform and template rules.
+
+## C++ style
+
+* Classes and types are `UpperCamelCase`; methods and functions are
+  `lowerCamelCase`.
+* Public fields in structs use plain names without a trailing underscore.
+* Apart from those naming conventions, follow Google C++ style.
+* Prefer concise, elegant examples. Use the fewest helpers needed and favor
+  direct construction and small local functors or lambdas over adapter
+  functions.
+* When reviewing changes, flag overly complex or long functions and recommend
+  breaking them into smaller functions.
+
+### Eigen Fixed-Size and Dynamic Storage
+
+Use fixed-size types such as `Matrix3`, `Matrix23`, and `Vector6` when
+dimensions are known at compile time, especially for `OptionalJacobian`
+outputs. Fixed-size types store their coefficients inline and avoid unnecessary
+dynamic allocation and fixed/dynamic conversions.
+
+Use `Matrix` and `Vector` when dimensions are determined at runtime or when an
+existing API explicitly requires a dynamic type.
+
+When assigning to a fixed-size Jacobian, prefer writing directly to it or using
+a fixed-size temporary:
+
+```cpp
+if (H) {
+  *H = Matrix3{{1.0, 0.0, 0.0},
+               {0.0, 1.0, 0.0},
+               {0.0, 0.0, 1.0}};
+}
+```
+
+Use flat initializer lists for vectors and nested initializer lists for
+matrices:
+
+```cpp
+Vector3 vector{1.0, 2.0, 3.0};
+Matrix23 matrix{{1.0, 2.0, 3.0},
+                {4.0, 5.0, 6.0}};
+```
+
+## Wrappers and vendored code
+
+* When a C++ function is exposed in a wrapper `.i` file, parameter names must
+  match exactly between the header declaration and the `.i` declaration.
+  Update both whenever a wrapped parameter name changes.
+* For templated classes and factors in wrappers, prefer the normal `.i`
+  template mechanism over one handwritten wrapper class per instantiation.
+  Let the wrapper generate names such as `AttitudeFactorRot3` from
+  `template<...> class AttitudeFactor`.
+* Do not add or retain C++ `using` or `typedef` aliases solely to manufacture
+  wrapper names. Keep aliases only when they are useful in the C++ API.
+* The top-level `wrap/` directory is a git subtree of `borglab/wrap`, not a
+  submodule. Make wrapper-generator contributions in `borglab/wrap`, then sync
+  them into GTSAM with `./update_wrap.sh [branch-or-tag]`, which defaults to
+  `master`. Run the sync on a feature branch because it creates GTSAM commits,
+  typically a squash followed by a merge commit. Do not edit `wrap/` directly
+  for changes that belong upstream.
+* Do not edit files under `gtsam/3rdparty/`. These are vendored third-party
+  libraries, including Eigen; direct changes make upstream updates difficult.
+
+### Shared Python and MATLAB interfaces
+
+* Keep declarations for the same C++ API in shared `.i` files.
+  When an optional dependency controls availability, have both wrappers
+  include the same interface conditionally. Use language-specific files
+  only for genuinely language-specific APIs, such as MATLAB callbacks.
+* Before adding container bindings, inspect existing precedents such as
+  KeyVector, Point2Vector, and FixedLagSmootherKeyTimestampMap. Check the
+  Python ignore list and compatibility aliases as well as the `.i` files.
+  Shared declarations may produce MATLAB proxy classes while Python
+  uses native lists and dictionaries.
+* Before proposing a wrapper-generator change, demonstrate why existing
+  interface declarations and configuration cannot express the required
+  binding. Distinguish missing functionality from a preferred conversion
+  or naming convention. Keep broader generator improvements separate.
+* Validate wrapper changes through actual calls in both languages.
+  Successful generation or compilation alone does not establish that
+  arguments, returned containers, or object lifetimes work. Exercise
+  parameter maps, container access, repeated retrieval, and 64-bit keys
+  where relevant. Check optional-dependency configurations too.
+* When an investigation reveals a simpler supported approach, remove
+  the superseded scaffolding and rewrite the PR description around the
+  final implementation.
+
+### Choosing an interface file for wrappers
+
+Place new wrapper declarations in the shared `.i` file for their logical
+API group. Add methods, constructors, and overloads to the existing wrapped
+class declaration in its current file. For new classes and free functions,
+use the following split; inspect declarations rather than `#include` lines,
+since sibling files also include headers for dependencies.
+
+* `gtsam/slam/slam.i`: between factors, planar and ordinary projection
+  factors, and general SFM factors (`BetweenFactor`, `PlanarProjectionFactor`,
+  `GenericProjectionFactor`, `GeneralSFMFactor`, and `GeneralSFMFactor2`).
+* `gtsam/slam/slam_smart_projection.i`: smart projection factors, their
+  parameters and base classes, and the linear-factor specializations they
+  return (`SmartFactorBase`, `SmartProjectionParams`, `SmartProjectionFactor`,
+  `SmartProjectionPoseFactor`, `SmartProjectionRigFactor`,
+  `RegularHessianFactor`, and `JacobianFactorQ`).
+* `gtsam/slam/slam_synchronization.i`: Lie-group synchronization, averaging,
+  and initialization (`FastSync`, `KarcherMeanFactor`, Frobenius factors,
+  `WahbaFactor`, `RelativeTranslationFactor`, `InitializePose3`, and `lago`);
+  dataset I/O; and the smaller SLAM factors already grouped here (stereo,
+  reference-frame, rotation, oriented-plane, pose translation/rotation priors,
+  known-landmark, and triangulation factors). Extend each family here.
+* `gtsam/nonlinear/nonlinear.i`: core nonlinear factor and graph APIs,
+  marginals, linear-container factors, batch optimizers and their parameters,
+  and incremental optimization (`ISAM2` and `NonlinearISAM`).
+* `gtsam/nonlinear/nonlinear_continuous_time.i`: continuous-time
+  Gaussian-process APIs (`StateData`, `WnoaMotionFactor`, `WnoaInterpFactor`,
+  and `WnoaFactorGraph`, together with its `ExpressionFactorGraph` base);
+  prior factors (`PriorFactor`, `ExtendedPriorFactor`, and
+  `ConcentratedGaussian`), `VectorNormFactor`, fixed-lag smoothers and their
+  supporting types, and `ExtendedKalmanFilter`.
+* `gtsam/nonlinear/values.i`: `Values` and its typed accessors.
+  `gtsam/nonlinear/custom.i`: `CustomFactor`.
+* `gtsam/navigation/navigation.i`: navigation state and IMU bias,
+  preintegration and IMU/AHRS factors, navigation measurement factors (GPS,
+  pseudorange, carrier phase, Doppler, attitude, barometric, constant velocity,
+  and magnetic), and scenarios and scenario runners.
+* `gtsam/navigation/navigation_geometric.i`: manifold, Lie-group, invariant,
+  and equivariant filters (`ManifoldEKF`, `LieGroupEKF`, `LeftLinearEKF`,
+  `InvariantEKF`, and `AbcEquivariantFilter`), specialized IMU EKFs
+  (`NavStateImuEKF` and `Gal3ImuEKF`), and legged estimators and their contact
+  measurements and parameters, including the legged fixed-lag smoothers.
+
+For APIs outside these groups, follow the existing shared `.i` file for that
+subsystem. Keep related classes and functions together and use descriptive
+topic names when a new logical group needs its own interface file. Keep each
+file's required includes with its declarations, and preserve registration
+order in `python/CMakeLists.txt` and `matlab/CMakeLists.txt`: a wrapped base
+class belongs in the same file as its derived classes or in an earlier file.
+
+## Tests
+
+* Run validation relevant to the files changed.
+* Run C++ tests from `build/` with `make -j6 testXXX.run`, replacing `testXXX`
+  with the relevant test target.
+* For Python commands in the standard local development environment, use the
+  `py312` conda environment. Run wrapper tests with
+  `cmake --build build --target python-test` or
+  `cmake --build build --target python-test-unstable`, as appropriate.
+* Documentation-only changes do not require unrelated C++ tests, but should
+  still pass applicable documentation checks and `git diff --check`.
+
+## Debugging indeterminate linear systems
+
+* Use the correctly spelled `IndeterminateSystemException`. The former
+  `IndeterminantLinearSystemException` name is available only through the
+  GTSAM 4.3 deprecation machinery.
+* Treat `nearbyVariable()` as the key where elimination detected the problem,
+  not necessarily its source; the reported key depends on graph structure and
+  elimination ordering.
+* Remember that the exception also protects against nearly indeterminate
+  systems. A mathematically full-rank graph can trigger it when elimination
+  produces a Cholesky pivot that is very small relative to its original
+  diagonal entry. This test is invariant to diagonal changes of variable units
+  but still depends on elimination ordering. For example, a very strong finite
+  prior combined with much looser measurement noise can expose a weakly
+  observed direction, although the raw weight ratio alone may only reflect
+  different variable units and is not sufficient evidence.
+* Preserve the failing nonlinear graph, values, and ordering. Linearize at
+  those values, request the Jacobian with an explicit ordering, and inspect its
+  singular spectrum and null space. Prefer Jacobian rank analysis over a
+  determinant or Hessian rank analysis because forming the Hessian squares the
+  condition number.
+* Check for missing gauge constraints, unused or accidental keys, disconnected
+  components, degenerate geometry or motion, lost observability after
+  marginalization, inconsistent units or noise scales, and negative curvature
+  introduced by custom Hessian factors.
+* Use a temporary, physically meaningful prior to test an observability
+  hypothesis, then recompute rank. If the intended prior fixes a gauge exactly,
+  prefer a hard constraint such as `noiseModel::Constrained::All(dimension)`;
+  it expresses that intent without choosing an arbitrary extreme finite weight.
+  Do not present damping or a dense solve as a fix unless the model itself
+  becomes observable and well conditioned.
+* See `gtsam/linear/doc/IndeterminateSystemException.ipynb` for a runnable
+  Python example and a full diagnostic checklist.
+
+## C++ test organization
+
+* Avoid one large anonymous namespace collecting every helper at the top of a
+  test file. Prefer small, named fixture-style namespaces containing both the
+  helpers and tests that use them.
+* Put at least one short `//` comment immediately above every `TEST()` explaining
+  the behavior being verified.
+* When using `/* ************************************************************************* */`
+  dividers, put one immediately before each fixture namespace and one
+  immediately after it closes. Do not put dividers between tests in the same
+  fixture namespace:
+
+  ```cpp
   /* ************************************************************************* */
   namespace my_fixture {
 
-  // definitions
-
   // Verifies the expected behavior.
   TEST(Suite, Case) {}
-  // Verifies another related behavior.
-  TEST(Suite, AnotherCase) {}
 
   }  // namespace my_fixture
   /* ************************************************************************* */
   ```
-* Notebooks in `*/doc/*.ipynb` and `*/examples/*.ipynb` should follow the standard preamble:
-  1) title/introduction markdown cell,
-  2) copyright markdown cell tagged `remove-cell`,
-  3) Colab badge markdown cell,
-  4) Colab install code cell tagged `remove-cell`,
-  5) imports/setup code cell.
-  Use the same `remove-cell` tagging convention as existing notebooks so docs build and Colab behavior stay consistent.
-* After any code change, always run relevant tests via `make -j6 testXXX.run` in the build folder $WORKSPACE/build. If in VS code, ask for escalated permissions if needed.
+
+## Documentation and reports
+
+* Always prefer Plotly for charts and data visualizations, including reports,
+  documentation pages, notebooks, and examples, so readers can inspect values
+  and interact with the figures.
+* Always load Plotly JavaScript from its version-pinned CDN in HTML reports,
+  documentation pages, and standalone downloads. Do not embed or vendor the
+  Plotly runtime. State that interactive charts require an internet connection.
+
+* Write for a robotics audience, without assuming expertise in GTSAM internals
+  or optimization solvers. Explain library-specific concepts, solver choices,
+  and numerical metrics when they are needed to interpret an example or result.
+* Lead each paragraph with a concrete topic sentence stating its main point.
+  Develop that point with the relevant explanation or evidence.
+* Use factual, descriptive headings. Avoid slogans, promotional language, and
+  conversational headings such as "Meet the datasets."
+* State what a comparison measures and how to interpret it before presenting
+  implementation details. Keep detailed numerical settings and provenance
+  available without making them prerequisites for understanding the results.
+
+## Notebooks
+
+Notebooks in `*/doc/*.ipynb` and `*/examples/*.ipynb` should use this preamble:
+
+1. Title and introductory Markdown cell.
+2. Copyright Markdown cell tagged `remove-cell`.
+3. Colab badge Markdown cell.
+4. Colab installation code cell tagged `remove-cell`.
+5. Imports and setup code cell.
+
+Use the existing `remove-cell` metadata convention so documentation builds and
+Colab behavior stay consistent.
+
+Always prefer Plotly for graphs and other notebook visualizations so figures
+are interactive.

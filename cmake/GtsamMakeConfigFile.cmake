@@ -3,12 +3,14 @@
 set(GTSAM_CONFIG_TEMPLATE_PATH ${CMAKE_CURRENT_LIST_DIR})
 
 function(GtsamMakeConfigFile PACKAGE_NAME)
+	include(GNUInstallDirs)
 
-	if(WIN32 AND NOT CYGWIN)
-		set(DEF_INSTALL_CMAKE_DIR CMake)
-	else()
-		set(DEF_INSTALL_CMAKE_DIR lib/cmake/${PACKAGE_NAME})
-	endif()
+	# The same layout on every platform. Windows used to get a flat <prefix>/CMake
+	# instead, which meant GTSAM and GTSAM_UNSTABLE wrote their config and export
+	# files into one shared directory, and it differed from where gtwrap and every
+	# other platform put them. find_package searches lib/cmake/<name> everywhere,
+	# so this needs no special case.
+	set(DEF_INSTALL_CMAKE_DIR lib/cmake/${PACKAGE_NAME})
 
 	# Configure extra file
 	if(NOT "${ARGV1}" STREQUAL "")
@@ -40,7 +42,7 @@ function(GtsamMakeConfigFile PACKAGE_NAME)
 	)
 
 	# Config file. RELATIVE_PATH needs the full path hence install prefix is specified.
-	file(RELATIVE_PATH CONF_REL_INCLUDE_DIR "${CMAKE_INSTALL_PREFIX}/${DEF_INSTALL_CMAKE_DIR}" "${CMAKE_INSTALL_PREFIX}/include")
+	file(RELATIVE_PATH CONF_REL_INCLUDE_DIR "${CMAKE_INSTALL_PREFIX}/${DEF_INSTALL_CMAKE_DIR}" "${CMAKE_INSTALL_FULL_INCLUDEDIR}")
 	file(RELATIVE_PATH CONF_REL_LIB_DIR "${CMAKE_INSTALL_PREFIX}/${DEF_INSTALL_CMAKE_DIR}" "${CMAKE_INSTALL_PREFIX}/lib")
 	configure_file(${GTSAM_CONFIG_TEMPLATE_PATH}/Config.cmake.in "${PROJECT_BINARY_DIR}/${PACKAGE_NAME}Config.cmake" @ONLY)
 	message(STATUS "Wrote ${PROJECT_BINARY_DIR}/${PACKAGE_NAME}Config.cmake")

@@ -10,6 +10,12 @@
 
 #include <gtsam/base/Lie.h>
 
+#include <cmath>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
+#include <vector>
+
 namespace gtsam {
 
 /// tag to assert a type is a vector space
@@ -319,6 +325,49 @@ struct traits<Eigen::Matrix<double, M, N, Options, MaxRows, MaxCols> > :
   typedef Eigen::Matrix<double, dimension, 1> TangentVector;
   typedef Eigen::Matrix<double, dimension, dimension> Jacobian;
   typedef OptionalJacobian<dimension, dimension> ChartJacobian;
+
+  /// Dimension of the exact D=1 QCQP vector `vec(value)`.
+  inline constexpr static int QcqpVectorDim = dimension;
+
+  /** Return the exact D=1 QCQP representation `vec(value)`. */
+  template <int D>
+  static Matrix QcqpValue(const Fixed& value) {
+    if constexpr (D == 1) {
+      return Eigen::Map<const TangentVector>(value.data());
+    } else {
+      throw std::invalid_argument(
+          "fixed-size vector-space QCQP values only support D=1.");
+    }
+  }
+
+  /** Vector spaces are unconstrained, so return no (A, a, b) triples. */
+  template <int D>
+  static std::vector<std::tuple<Matrix, Vector, double>> QcqpConstraints() {
+    if constexpr (D == 1) {
+      return {};
+    } else {
+      throw std::invalid_argument(
+          "fixed-size vector-space QCQP constraints only support D=1.");
+    }
+  }
+
+  /** Recover a fixed-size value from its exact D=1 QCQP vector. */
+  template <int D>
+  static Fixed FromQcqpValue(const Matrix& qcqpValue) {
+    if constexpr (D == 1) {
+      if (qcqpValue.rows() != QcqpVectorDim || qcqpValue.cols() != 1) {
+        throw std::invalid_argument(
+            "fixed-size vector-space QCQP recovery requires a compatible "
+            "vector.");
+      }
+      Fixed result;
+      Eigen::Map<TangentVector>(result.data()) = qcqpValue.col(0);
+      return result;
+    } else {
+      throw std::invalid_argument(
+          "fixed-size vector-space QCQP recovery only supports D=1.");
+    }
+  }
 
   static TangentVector Local(const Fixed& origin, const Fixed& other,
       ChartJacobian H1 = {}, ChartJacobian H2 = {}) {

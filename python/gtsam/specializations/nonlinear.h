@@ -10,3 +10,60 @@
  * with `PYBIND11_MAKE_OPAQUE` this allows the types to be modified with Python,
  * and saves one copy operation.
  */
+
+// Register before NoiseModelFactor::unwhitenedError so pybind11 can use the
+// Python type name in that method's signature. CustomFactor is bound later.
+py::bind_vector<std::vector<gtsam::Matrix>>(
+    m_, "JacobianVector", py::module_local(false));
+
+// Copies crossing Python callback boundaries retain the same parameter identity.
+{
+  auto parameterTag = py::reinterpret_borrow<
+      py::class_<gtsam::ParameterTag, std::shared_ptr<gtsam::ParameterTag>>>(
+      m_.attr("ParameterTag"));
+  parameterTag.def(py::self == py::self)
+      .def(py::self != py::self)
+      .def("__hash__", &gtsam::ParameterTag::hash)
+      .def("__copy__", [](const gtsam::ParameterTag& self) { return self; })
+      .def("__deepcopy__", [](const gtsam::ParameterTag& self, py::dict) {
+        return self;
+      });
+}
+
+{
+  using PythonAffectedKeys =
+      std::map<gtsam::FactorIndex, std::set<gtsam::Key>>;
+
+  auto updateParams = py::reinterpret_borrow<
+      py::class_<gtsam::ISAM2UpdateParams,
+                 std::shared_ptr<gtsam::ISAM2UpdateParams>>>(
+      m_.attr("ISAM2UpdateParams"));
+  updateParams.def_property(
+      "newAffectedKeys",
+      [](const gtsam::ISAM2UpdateParams& params)
+          -> std::optional<PythonAffectedKeys> {
+        if (!params.newAffectedKeys) {
+          return std::nullopt;
+        }
+
+        PythonAffectedKeys result;
+        for (const auto& [factorIndex, keys] : *params.newAffectedKeys) {
+          result.emplace(factorIndex,
+                         std::set<gtsam::Key>(keys.begin(), keys.end()));
+        }
+        return result;
+      },
+      [](gtsam::ISAM2UpdateParams& params,
+         const std::optional<PythonAffectedKeys>& affectedKeys) {
+        if (!affectedKeys) {
+          params.newAffectedKeys.reset();
+          return;
+        }
+
+        gtsam::FastMap<gtsam::FactorIndex, gtsam::KeySet> result;
+        for (const auto& [factorIndex, keys] : *affectedKeys) {
+          result.emplace(factorIndex, gtsam::KeySet(keys));
+        }
+        params.newAffectedKeys = std::move(result);
+      });
+}

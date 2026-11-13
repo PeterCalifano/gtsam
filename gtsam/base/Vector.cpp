@@ -23,7 +23,6 @@
 #include <limits>
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <cassert>
 #include <iomanip>
 #include <cmath>
@@ -100,6 +99,7 @@ void save(const Vector& v, const string &s, const string& filename) {
   stream.close();
 }
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /* ************************************************************************* */
 bool operator==(const Vector& vec1,const Vector& vec2) {
   if (vec1.size() != vec2.size()) return false;
@@ -118,6 +118,7 @@ bool greaterThanOrEqual(const Vector& vec1, const Vector& vec2) {
       return false;
   return true;
 }
+#endif
 
 /* ************************************************************************* */
 bool equal_with_abs_tol(const Vector& vec1, const Vector& vec2, double tol) {
@@ -313,6 +314,7 @@ Vector concatVectors(const std::list<Vector>& vs) {
   return A;
 }
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /* ************************************************************************* */
 Vector concatVectors(size_t nrVectors, ...)
 {
@@ -326,5 +328,6 @@ Vector concatVectors(size_t nrVectors, ...)
   va_end(ap);
   return concatVectors(vs);
 }
+#endif
 
 } // namespace gtsam

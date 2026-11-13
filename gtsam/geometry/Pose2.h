@@ -100,11 +100,6 @@ public:
   /// @name Advanced Constructors
   /// @{
 
-  /** Construct from canonical coordinates \f$ [T_x,T_y,\theta] \f$ (Lie algebra) */
-  Pose2(const Vector& v) : Pose2() {
-    *this = Expmap(v);
-  }
-
   /**
    *  Create Pose2 by aligning two point pairs
    *  A pose aTb is estimated between pairs (a_point, b_point) such that 
@@ -170,8 +165,22 @@ public:
   /// Derivative of Expmap
   static Matrix3 ExpmapDerivative(const Vector3& v);
 
-  /// Derivative of Logmap
-  static Matrix3 LogmapDerivative(const Pose2& v);
+  /**
+   * Inverse right Jacobian of the exponential map evaluated at a pose.
+   *
+   * @param pose Pose whose tangent coordinates determine the evaluation point.
+   * @return The 3-by-3 inverse right Jacobian at Logmap(pose).
+   */
+  static Matrix3 LogmapDerivative(const Pose2& pose);
+
+  /**
+   * Inverse right Jacobian of the exponential map evaluated at tangent
+   * coordinates xi = (dx, dy, dtheta).
+   *
+   * @param xi Tangent coordinates at which to evaluate the Jacobian.
+   * @return The 3-by-3 inverse right Jacobian at xi.
+   */
+  static Matrix3 LogmapDerivative(const Vector3& xi);
 
   // Chart at origin, depends on compile-time flag SLOW_BUT_CORRECT_EXPMAP
   struct GTSAM_EXPORT ChartAtOrigin {
@@ -250,7 +259,7 @@ public:
 
   /// rotation
   inline const Rot2&   rotation(OptionalJacobian<1, 3> Hself={}) const {
-    if (Hself) *Hself << 0, 0, 1;
+    if (Hself) *Hself = Matrix13{{0, 0, 1}};
     return r_;
   }
 
@@ -327,6 +336,12 @@ public:
   static inline Matrix3 wedge(double vx, double vy, double w) {
     return Hat(TangentVector(vx, vy, w));
   }
+
+  /// @deprecated: use Expmap. This is the exponential map, not componentwise
+  /// construction: use Pose2(x, y, theta) for that.
+  Pose2(const Vector& v) : Pose2() {
+    *this = Expmap(v);
+  }
 #endif
   /// @}
 
@@ -341,10 +356,6 @@ public:
     ar & BOOST_SERIALIZATION_NVP(r_);
   }
 #endif
-
-public:
-  // Align for Point2, which is either derived from, or is typedef, of Vector2
-  GTSAM_MAKE_ALIGNED_OPERATOR_NEW
 }; // Pose2
 
 #ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
@@ -360,11 +371,117 @@ inline Matrix wedge<Pose2>(const Vector& xi) {
 using Pose2Pair = std::pair<Pose2, Pose2>;
 using Pose2Pairs = std::vector<Pose2Pair>;
 
+/**
+ * Add the Pose2-specific operations used by the generic QCQP conversion code.
+ *
+ * `template <> struct traits<Pose2>` specializes GTSAM's generic `traits<T>`
+ * interface for T=Pose2. The static methods can therefore be called as
+ * `traits<Pose2>::QcqpValue<1>(pose)` without constructing a traits object.
+ *
+ * Each method is itself a template on D, the QCQP variable's column count.
+ * `if constexpr (D == 1)` selects this exact vector formulation at compile
+ * time. The lift discards the fixed last row [0, 0, 1] of the Pose2 matrix and
+ * stores the remaining entries column by column:
+ *
+ *   x = [r00, r10, r01, r11, tx, ty]'.
+ *
+ * Eigen's `segment<2>(start)` selects two consecutive entries of x, while
+ * `T.col(column).head<2>()` selects the first two entries of one matrix column.
+ * QcqpConstraints returns the symmetric matrices A and scalars b for the four
+ * equations x' A x = b, whose linear terms are empty. Their translation rows
+ * and columns are zero, so these equations constrain only the embedded SO(2)
+ * rotation.
+ */
 template <>
-struct traits<Pose2> : public internal::MatrixLieGroup<Pose2, 3> {};
+struct traits<Pose2> : public internal::MatrixLieGroup<Pose2, 3> {
+  /// Dimension of the D=1 QCQP vector.
+  inline constexpr static int QcqpVectorDim = 6;
+
+  /**
+   * Return the D=1 QCQP variable
+   * x = [r00, r10, r01, r11, tx, ty].
+   */
+  template <int D = 1>
+  static Matrix QcqpValue(const Pose2& value) {
+    if constexpr (D == 1) {
+      const Matrix3 T = value.matrix();
+      Vector6 X;
+      X.segment<2>(0) = T.col(0).head<2>();
+      X.segment<2>(2) = T.col(1).head<2>();
+      X.segment<2>(4) = T.col(2).head<2>();
+      return X;
+    } else {
+      throw std::invalid_argument(
+          "traits<Pose2>::QcqpValue only supports D=1.");
+    }
+  }
+
+  /**
+   * Return the four D=1 lifted SE(2) manifold constraints (A, a, b) such that
+   * trace(x' A x) = b; their linear terms a are empty.
+   */
+  template <int D = 1>
+  static std::vector<std::tuple<Matrix, Vector, double>> QcqpConstraints() {
+    if constexpr (D == 1) {
+      std::vector<std::tuple<Matrix, Vector, double>> constraints;
+      constraints.reserve(4);
+
+      Matrix A = Matrix::Zero(6, 6);
+
+      // det(R) = r00*r11 - r10*r01 = 1.
+      A(0, 3) = 0.5;
+      A(3, 0) = 0.5;
+      A(1, 2) = -0.5;
+      A(2, 1) = -0.5;
+      constraints.emplace_back(A, Vector(), 1.0);
+
+      // RR^T = I.
+      A.setZero();
+      A(0, 0) = 1.0;
+      A(2, 2) = 1.0;
+      constraints.emplace_back(A, Vector(), 1.0);
+
+      A.setZero();
+      A(0, 1) = 0.5;
+      A(1, 0) = 0.5;
+      A(2, 3) = 0.5;
+      A(3, 2) = 0.5;
+      constraints.emplace_back(A, Vector(), 0.0);
+
+      A.setZero();
+      A(1, 1) = 1.0;
+      A(3, 3) = 1.0;
+      constraints.emplace_back(A, Vector(), 1.0);
+
+      return constraints;
+    } else {
+      throw std::invalid_argument(
+          "traits<Pose2>::QcqpConstraints only supports D=1.");
+    }
+  }
+
+  /** Project a D=1 QCQP vector back to Pose2. */
+  template <int D>
+  static Pose2 FromQcqpValue(const Matrix& X) {
+    if constexpr (D == 1) {
+      if (X.rows() != QcqpVectorDim || X.cols() != 1) {
+        throw std::invalid_argument(
+            "traits<Pose2>::FromQcqpValue requires a 6-by-1 vector.");
+      }
+      const Vector x = X.col(0);
+      Matrix2 R;
+      R.col(0) = x.segment<2>(0);
+      R.col(1) = x.segment<2>(2);
+      return Pose2(Rot2::ClosestTo(R), x.segment<2>(4));
+    } else {
+      throw std::invalid_argument(
+          "traits<Pose2>::FromQcqpValue only supports D=1.");
+    }
+  }
+};
 
 template <>
-struct traits<const Pose2> : public internal::MatrixLieGroup<Pose2, 3> {};
+struct traits<const Pose2> : public traits<Pose2> {};
 
 // bearing and range traits, used in RangeFactor
 template <typename T>

@@ -23,13 +23,16 @@
 
 #pragma once
 
-#include <gtsam/geometry/Unit3.h>
+#include <gtsam/base/concepts.h>
+#include <gtsam/config.h>  // Get GTSAM_USE_QUATERNIONS macro
 #include <gtsam/geometry/Quaternion.h>
 #include <gtsam/geometry/SO3.h>
-#include <gtsam/base/concepts.h>
-#include <gtsam/config.h> // Get GTSAM_USE_QUATERNIONS macro
+#include <gtsam/geometry/Unit3.h>
 
 #include <random>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
 
 // You can override the default coordinate mode using this flag
 #ifndef ROT3_DEFAULT_COORDINATES_MODE
@@ -48,6 +51,11 @@
 #endif
 
 namespace gtsam {
+
+namespace internal {
+template <typename G>
+struct TangentLieGroupJacobian;
+}  // namespace internal
 
 /**
  * @brief Rot3 is a 3D rotation represented as a rotation matrix if the
@@ -140,6 +148,9 @@ class GTSAM_EXPORT Rot3 : public MatrixLieGroup<Rot3, 3, 3> {
 
     /** Virtual destructor */
     virtual ~Rot3() {}
+
+    /// Check if a 3x3 matrix is a valid rotation (orthonormal with det +1).
+    static bool IsValid(const Matrix3& R, double tol = 1e-9);
 
     /* Static member function to generate some well known rotations */
 
@@ -571,12 +582,6 @@ class GTSAM_EXPORT Rot3 : public MatrixLieGroup<Rot3, 3, 3> {
 #endif
     }
 #endif
-
-#ifdef GTSAM_USE_QUATERNIONS
-  // only align if quaternion, Matrix3 has no alignment requirements
-  public:
-    GTSAM_MAKE_ALIGNED_OPERATOR_NEW
-#endif
   };
 
   /// std::vector of Rot3s, used in Matlab wrapper
@@ -595,10 +600,268 @@ class GTSAM_EXPORT Rot3 : public MatrixLieGroup<Rot3, 3, 3> {
   GTSAM_EXPORT std::pair<Matrix3, Vector3> RQ(
       const Matrix3& A, OptionalJacobian<3, 9> H = {});
 
-  template <>
-struct traits<Rot3> : public internal::MatrixLieGroup<Rot3, 3> {};
+template <>
+struct traits<Rot3> : public internal::MatrixLieGroup<Rot3, 3> {
+  /// Dimension of the D=1 QCQP vector vec(R).
+  inline constexpr static int QcqpVectorDim = 9;
+
+  /**
+   * Return a matrix-valued QCQP variable for Rot3.
+   *
+   * D=1 uses the column-major SO(3) vectorization, yielding a 9-by-1
+   * matrix.
+   * D>=3 returns [R', 0] as a 3-by-D row-orthonormal matrix. These variables
+   * form a Stiefel relaxation with a common right-O(D) gauge.
+   */
+  template <int D = 1>
+  static Matrix QcqpValue(const Rot3& value) {
+    if constexpr (D == 1) {
+      const Matrix3 R = value.matrix();
+      return Eigen::Map<const Matrix>(R.data(), 9, 1);
+    } else if constexpr (D >= 3) {
+      Matrix X = Matrix::Zero(3, D);
+      X.template leftCols<3>() = value.matrix().transpose();
+      return X;
+    } else {
+      throw std::invalid_argument(
+          "traits<Rot3>::QcqpValue only supports D=1 and D>=3.");
+    }
+  }
+
+  /**
+   * Return row-space QCQP equality constraints (A, a, b) such that
+   * trace(X' A X) + 2 a' x = b, with an empty a meaning no linear term. For D=1
+   * these are the lifted SO(3) constraints in column-major coordinates; the
+   * three right-handedness rows carry a linear term. For D>=3 the same 3-by-3
+   * constraints, all with empty a, enforce XX'=I. The D=1 right-handedness
+   * constraints distinguish SO(3) from the reflected component of O(3).
+   */
+  template <int D = 1>
+  static std::vector<std::tuple<Matrix, Vector, double>> QcqpConstraints() {
+    if constexpr (D == 1) {
+      // The Rot3 vector is
+      // x = [r00, r10, r20, r01, r11, r21, r02, r12, r22].
+      std::vector<std::tuple<Matrix, Vector, double>> constraints;
+      constraints.reserve(9);
+
+      Matrix A = Matrix::Zero(9, 9);
+
+      // cross(R.col(1), R.col(2)) = R.col(0), with R.col(0) as the linear term
+      // 2 a' x, so a = -e_k / 2.
+      A(4, 8) = 0.5;
+      A(8, 4) = 0.5;
+      A(5, 7) = -0.5;
+      A(7, 5) = -0.5;
+      constraints.emplace_back(A, -0.5 * Vector::Unit(9, 0), 0.0);
+
+      A.setZero();
+      A(5, 6) = 0.5;
+      A(6, 5) = 0.5;
+      A(3, 8) = -0.5;
+      A(8, 3) = -0.5;
+      constraints.emplace_back(A, -0.5 * Vector::Unit(9, 1), 0.0);
+
+      A.setZero();
+      A(3, 7) = 0.5;
+      A(7, 3) = 0.5;
+      A(4, 6) = -0.5;
+      A(6, 4) = -0.5;
+      constraints.emplace_back(A, -0.5 * Vector::Unit(9, 2), 0.0);
+
+      // RR^T = I supplies the six row-orthonormality constraints.
+      A.setZero();
+      A(0, 0) = 1.0;
+      A(3, 3) = 1.0;
+      A(6, 6) = 1.0;
+      constraints.emplace_back(A, Vector(), 1.0);
+
+      A.setZero();
+      A(0, 1) = 0.5;
+      A(1, 0) = 0.5;
+      A(3, 4) = 0.5;
+      A(4, 3) = 0.5;
+      A(6, 7) = 0.5;
+      A(7, 6) = 0.5;
+      constraints.emplace_back(A, Vector(), 0.0);
+
+      A.setZero();
+      A(0, 2) = 0.5;
+      A(2, 0) = 0.5;
+      A(3, 5) = 0.5;
+      A(5, 3) = 0.5;
+      A(6, 8) = 0.5;
+      A(8, 6) = 0.5;
+      constraints.emplace_back(A, Vector(), 0.0);
+
+      A.setZero();
+      A(1, 1) = 1.0;
+      A(4, 4) = 1.0;
+      A(7, 7) = 1.0;
+      constraints.emplace_back(A, Vector(), 1.0);
+
+      A.setZero();
+      A(1, 2) = 0.5;
+      A(2, 1) = 0.5;
+      A(4, 5) = 0.5;
+      A(5, 4) = 0.5;
+      A(7, 8) = 0.5;
+      A(8, 7) = 0.5;
+      constraints.emplace_back(A, Vector(), 0.0);
+
+      A.setZero();
+      A(2, 2) = 1.0;
+      A(5, 5) = 1.0;
+      A(8, 8) = 1.0;
+      constraints.emplace_back(A, Vector(), 1.0);
+
+      return constraints;
+    } else if constexpr (D >= 3) {
+      std::vector<std::tuple<Matrix, Vector, double>> constraints;
+      constraints.reserve(6);
+
+      // 3 row-unit-norm: ||row r||^2 = 1.
+      for (int r = 0; r < 3; ++r) {
+        Matrix A = Matrix::Zero(3, 3);
+        A(r, r) = 1.0;
+        constraints.emplace_back(A, Vector(), 1.0);
+      }
+
+      // 3 row-orthogonality: row r1 . row r2 = 0.
+      for (int r1 = 0; r1 < 3; ++r1) {
+        for (int r2 = r1 + 1; r2 < 3; ++r2) {
+          Matrix A = Matrix::Zero(3, 3);
+          A(r1, r2) = 0.5;
+          A(r2, r1) = 0.5;
+          constraints.emplace_back(A, Vector(), 0.0);
+        }
+      }
+      return constraints;
+    } else {
+      throw std::invalid_argument(
+          "traits<Rot3>::QcqpConstraints only supports D=1 and D>=3.");
+    }
+  }
+
+  /**
+   * Return the eleven D=1 redundant SO(3) constraints (A, a, b), in the form
+   * of QcqpConstraints<1>(). Every rotation satisfies them, so they are
+   * implied by the nine manifold constraints and add nothing to the QCQP, but
+   * they tighten its SDP relaxation. They are five column-orthonormality
+   * equations of R'R = I (the last column norm follows from the trace) and
+   * the cyclic cross products cross(c2, c0) = c1 and cross(c0, c1) = c2,
+   * which complete the right-handedness rows cross(c1, c2) = c0.
+   */
+  static std::vector<std::tuple<Matrix, Vector, double>>
+  QcqpRedundantConstraints() {
+    // Index of R(row, column) in the column-major x = vec(R).
+    const auto index = [](int row, int column) { return row + 3 * column; };
+    std::vector<std::tuple<Matrix, Vector, double>> constraints;
+    constraints.reserve(11);
+
+    // R'R = I: dot(c_i, c_j) = delta_ij, omitting the implied ||c_2||^2 = 1.
+    for (int i = 0; i < 3; ++i) {
+      for (int j = i; j < 3; ++j) {
+        if (i == 2 && j == 2) continue;
+        Matrix A = Matrix::Zero(9, 9);
+        for (int row = 0; row < 3; ++row) {
+          A(index(row, i), index(row, j)) += 0.5;
+          A(index(row, j), index(row, i)) += 0.5;
+        }
+        constraints.emplace_back(A, Vector(), i == j ? 1.0 : 0.0);
+      }
+    }
+
+    // cross(c_j, c_k) = c_i for (i, j, k) = (1, 2, 0) and (2, 0, 1), with
+    // c_i as the linear term 2 a' x, so a = -e / 2.
+    for (int i = 1; i < 3; ++i) {
+      const int j = (i + 1) % 3, k = (i + 2) % 3;
+      for (int row = 0; row < 3; ++row) {
+        const int next = (row + 1) % 3, last = (row + 2) % 3;
+        Matrix A = Matrix::Zero(9, 9);
+        A(index(next, j), index(last, k)) += 0.5;
+        A(index(last, k), index(next, j)) += 0.5;
+        A(index(last, j), index(next, k)) -= 0.5;
+        A(index(next, k), index(last, j)) -= 0.5;
+        constraints.emplace_back(A, -0.5 * Vector::Unit(9, index(row, i)),
+                                 0.0);
+      }
+    }
+    return constraints;
+  }
+
+  /**
+   * Project a D=1 vector or canonical 3-by-D lift back to Rot3.
+   *
+   * Matrix-form QCQP solutions have a right-O(D) gauge, making this
+   * leading-block projection gauge-dependent unless the caller has first
+   * chosen a gauge. Matrix-form X must be exactly 3-by-D.
+   */
+  template <int D>
+  static Rot3 FromQcqpValue(const Matrix& X) {
+    if constexpr (D == 1) {
+      if (X.rows() != QcqpVectorDim || X.cols() != 1) {
+        throw std::invalid_argument(
+            "traits<Rot3>::FromQcqpValue requires a 9-by-1 vector.");
+      }
+      return Rot3::ClosestTo(Eigen::Map<const Matrix3>(X.data()));
+    } else {
+      static_assert(D >= 3,
+                    "traits<Rot3>::FromQcqpValue requires D >= 3.");
+      if (X.rows() != 3 || X.cols() != D) {
+        throw std::invalid_argument(
+            "traits<Rot3>::FromQcqpValue requires a 3-by-D matrix.");
+      }
+      return Rot3::ClosestTo(X.template leftCols<3>().transpose());
+    }
+  }
+};
 
 template <>
-struct traits<const Rot3> : public internal::MatrixLieGroup<Rot3, 3> {};
-  
+struct traits<const Rot3> : public traits<Rot3> {};
+
+namespace internal {
+
+/**
+ * Closed-form right Jacobian for TSO(3) = SO(3) semidirect-product so(3).
+ *
+ * Under the standard [omega; v] coordinates, TSO(3) is isomorphic to SE(3):
+ * the algebra component v is exactly the translational component. Reusing the
+ * SO(3) dexp kernel therefore produces the same block Jacobian as
+ * Pose3::Expmap, without evaluating the generic 9-by-9 Frechet exponential.
+ */
+template <>
+struct TangentLieGroupJacobian<Rot3> {
+  static constexpr bool available = true;
+  static constexpr bool expmapAvailable = true;
+
+  /**
+   * Evaluate the complete TSO(3) exponential from one SO(3) kernel.
+   *
+   * The precomputed rotation is passed back into tangentExpmap so evaluating
+   * Q_r never repeats Rodrigues' formula. The returned pair is exactly the
+   * rotation and translation of Pose3::Expmap under the TSO(3) isomorphism.
+   */
+  static std::pair<Rot3, Vector3> expmap(
+      const Vector3& omega, const Vector3& v,
+      OptionalJacobian<6, 6> derivative = {}) {
+    const so3::DexpFunctor local(omega);
+#ifdef GTSAM_USE_QUATERNIONS
+    const Rot3 rotation = traits<gtsam::Quaternion>::Expmap(omega);
+#else
+    const Rot3 rotation(local.expmap());
+#endif
+    const Vector3 transported =
+        local.tangentExpmap(v, rotation.matrix(), derivative);
+    return {rotation, transported};
+  }
+
+  static Matrix6 rightJacobian(const Vector3& omega, const Vector3& v) {
+    Matrix6 derivative;
+    expmap(omega, v, derivative);
+    return derivative;
+  }
+};
+
+}  // namespace internal
+
 }  // namespace gtsam

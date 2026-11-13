@@ -23,10 +23,8 @@
 #include <gtsam/discrete/Ring.h>
 
 #include <Eigen/Sparse>
-#include <algorithm>
 #include <map>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,6 +36,12 @@
 #endif
 
 namespace gtsam {
+
+/**
+ * @brief Using Eigen::SparseVector with 64 bit indices to support large
+ * discrete factors. Fixes https://github.com/borglab/gtsam/issues/2831
+ */
+using SparseVector = Eigen::SparseVector<double, 0, int64_t>;
 
 class DiscreteConditional;
 class HybridValues;
@@ -53,7 +57,7 @@ class HybridValues;
 class GTSAM_EXPORT TableFactor : public DiscreteFactor {
  protected:
   /// SparseVector of nonzero probabilities.
-  Eigen::SparseVector<double> sparse_table_;
+  SparseVector sparse_table_;
 
  private:
   /// Map of Keys and their denominators used in keyValueForIndex.
@@ -62,18 +66,41 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
   DiscreteKeys sorted_dkeys_;
 
   /**
-   * @brief Uses lazy cartesian product to find nth entry in the cartesian
-   * product of arrays in O(1)
-   * Example)
-   *   v0 | v1 | val
-   *    0 |  0 |  10
-   *    0 |  1 |  21
-   *    1 |  0 |  32
-   *    1 |  1 |  43
-   *   keyValueForIndex(v1, 2) = 0
-   * @param target_key nth entry's key to find out its assigned value
-   * @param index nth entry in the sparse vector
-   * @return TableFactor
+   * Return the discrete value assigned to `target_key` at a linear table
+   * index.
+   *
+   * A key's discrete value is the integer identifying one of its alternatives,
+   * ranging from zero to its cardinality minus one. It is distinct from the
+   * factor value stored at a table index. Keys use the order in which they
+   * were supplied to the factor, and the last key varies fastest.
+   * `denominators_[target_key]` is the product of the cardinalities of all
+   * keys after `target_key`, so the discrete value is
+   * `(index / denominators_[target_key]) % cardinality(target_key)`.
+   *
+   * `index` is the linear index in the full table, even when the table is
+   * sparse; it is not the ordinal number of a nonzero entry. For example, let
+   * `v0` have cardinality 2 and `v1` cardinality 3:
+   *
+   *   index | v0 discrete value | v1 discrete value | factor value
+   *   ------|-------------------|-------------------|-------------
+   *       0 |                 0 |                 0 |          10
+   *       1 |                 0 |                 1 |          21
+   *       2 |                 0 |                 2 |          32
+   *       3 |                 1 |                 0 |          43
+   *       4 |                 1 |                 1 |          54
+   *       5 |                 1 |                 2 |          65
+   *
+   * At index 2, `keyValueForIndex(v1, 2)` returns the discrete value 2; the
+   * factor value in that row is 32. At index 5, the discrete value for `v1`
+   * is also 2, but the factor value is 65. Meanwhile,
+   * `keyValueForIndex(v0, 2)` returns 0. With three keys `(x, y, z)` of
+   * cardinalities `(2, 3, 2)`, `z` changes every index, `y` every 2 indices,
+   * and `x` every 6 indices. Index 8 represents the discrete values
+   * `(x, y, z) = (1, 1, 0)`.
+   *
+   * @param target_key Key whose discrete value to decode.
+   * @param index Linear index in the full Cartesian-product table.
+   * @return The discrete value of `target_key` at `index`.
    */
   size_t keyValueForIndex(Key target_key, uint64_t index) const;
 
@@ -86,23 +113,34 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
     return DiscreteKey(keys_[i], cardinalities_.at(keys_[i]));
   }
 
+  /**
+   * Apply a binary operator when every key and cardinality of `factor` is
+   * contained in this table. Each stored entry projects to exactly one index
+   * in `factor`; only stored matches invoke op, in the original operand order.
+   * Preserve the sorted result layout and the intersection of stored entries,
+   * including explicitly stored zeros. Storage strides, not keys_ order,
+   * determine the projection. See doc/TableFactorSubsetOperations.md for the
+   * index derivation, sparse semantics, and benchmark reproduction commands.
+   */
+  TableFactor applySubset(const TableFactor& factor, Binary op) const;
+
  public:
   /**
    * Convert probability table given as doubles to SparseVector.
    * Example: {0, 1, 1, 0, 0, 1, 0} -> values: {1, 1, 1}, indices: {1, 2, 5}
    */
-  static Eigen::SparseVector<double> Convert(const DiscreteKeys& keys,
+  static SparseVector Convert(const DiscreteKeys& keys,
                                              const std::vector<double>& table);
 
   /// Convert probability table given as string to SparseVector.
-  static Eigen::SparseVector<double> Convert(const DiscreteKeys& keys,
+  static SparseVector Convert(const DiscreteKeys& keys,
                                              const std::string& table);
 
   // typedefs needed to play nice with gtsam
   typedef TableFactor This;
   typedef DiscreteFactor Base;  ///< Typedef to base class
   typedef std::shared_ptr<TableFactor> shared_ptr;
-  typedef Eigen::SparseVector<double>::InnerIterator SparseIt;
+  typedef SparseVector::InnerIterator SparseIt;
   typedef std::vector<std::pair<DiscreteValues, double>> AssignValList;
 
   /// @name Standard Constructors
@@ -116,7 +154,7 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
 
   /** Constructor from sparse_table */
   TableFactor(const DiscreteKeys& keys,
-              const Eigen::SparseVector<double>& table);
+              const SparseVector& table);
 
   /** Constructor from doubles */
   TableFactor(const DiscreteKeys& keys, const std::vector<double>& table)
@@ -162,7 +200,7 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
   // /// @{
 
   /// Getter for the underlying sparse vector
-  Eigen::SparseVector<double> sparseTable() const { return sparse_table_; }
+  SparseVector sparseTable() const { return sparse_table_; }
 
   /// Evaluate probability distribution, is just look up in TableFactor.
   double evaluate(const Assignment<Key>& values) const override;
@@ -183,6 +221,9 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
 
   /// multiply with DecisionTreeFactor
   DecisionTreeFactor operator*(const DecisionTreeFactor& f) const override;
+
+  /// Multiply with a conditional, keeping the sparse table representation.
+  TableFactor operator*(const DiscreteConditional& c) const;
 
   /**
    * @brief Multiply factors, DiscreteFactor::shared_ptr edition.
@@ -215,6 +256,9 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
   /// Convert into a decisiontree
   DecisionTreeFactor toDecisionTreeFactor() const override;
 
+  /// Return this sparse table representation.
+  TableFactor toTableFactor() const override { return *this; }
+
   /// Create a TableFactor that is a subset of this TableFactor
   TableFactor choose(const DiscreteValues parentAssignments,
                      DiscreteKeys parent_keys) const;
@@ -227,6 +271,9 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
 
   /// Find the maximum value in the factor.
   double max() const override;
+
+  /// Return the assignment to all keys with the largest value.
+  DiscreteValues argmax() const;
 
   /// Create new factor by maximizing over all values with the same separator.
   DiscreteFactor::shared_ptr max(size_t nrFrontals) const override;
@@ -256,24 +303,6 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
    * @param op a binary operator that operates on TableFactor
    */
   TableFactor apply(const TableFactor& f, Binary op) const;
-
-  /**
-   * Return keys in contract mode.
-   *
-   * Modes are each of the dimensions of a sparse tensor,
-   * and the contract modes represent which dimensions will
-   * be involved in contraction (aka tensor multiplication).
-   */
-  DiscreteKeys contractDkeys(const TableFactor& f) const;
-
-  /**
-   * @brief Return keys in free mode which are the dimensions
-   * not involved in the contraction operation.
-   */
-  DiscreteKeys freeDkeys(const TableFactor& f) const;
-
-  /// Return union of DiscreteKeys in two factors.
-  DiscreteKeys unionDkeys(const TableFactor& f) const;
 
   /// Create unique representation of union modes.
   uint64_t unionRep(const DiscreteKeys& keys, const DiscreteValues& assign,
@@ -312,28 +341,24 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
    */
   shared_ptr combine(const Ordering& keys, Binary op) const;
 
-  /// Enumerate all values into a map from values to double.
-  std::vector<std::pair<DiscreteValues, double>> enumerate() const;
-
   /**
    * @brief Prune the decision tree of discrete variables.
    *
    * Pruning will set the values to be "pruned" to 0 indicating a 0
-   * probability. An assignment is pruned if it is not in the top
-   * `maxNrAssignments` values.
+   * probability. An assignment is pruned if its value is smaller than the
+   * `maxNrAssignments`-th largest value, counting duplicates.
    *
-   * A violation can occur if there are more
-   * duplicate values than `maxNrAssignments`. A violation here is the need to
-   * un-prune the decision tree (e.g. all assignment values are 1.0). We could
-   * have another case where some subset of duplicates exist (e.g. for a tree
-   * with 8 assignments we have 1, 1, 1, 1, 0.8, 0.7, 0.6, 0.5), but this is
-   * not a violation since the for `maxNrAssignments=5` the top values are (1,
-   * 0.8).
+   * Every assignment tied with that value is kept, so more than
+   * `maxNrAssignments` assignments survive when ties straddle the cutoff.
+   * For example, pruning (0.2, 0.2, 0.1, 0.2, 0.3) to 3 assignments gives
+   * (0.2, 0.2, 0, 0.2, 0.3), and a factor whose values are all equal is not
+   * pruned at all. This matches DecisionTreeFactor::prune.
    *
    * @param maxNrAssignments The maximum number of assignments to keep.
-   * @return TableFactor
+   * @return The pruned TableFactor.
    */
-  TableFactor prune(size_t maxNrAssignments) const;
+  [[nodiscard]] DiscreteFactor::shared_ptr prune(
+      size_t maxNrAssignments) const override;
 
   /**
    * Get the number of non-zero values contained in this factor.
@@ -341,7 +366,17 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
    */
   uint64_t nrValues() const override { return sparse_table_.nonZeros(); }
 
-  /// Restrict the factor to the given assignment.
+  /**
+   * Return the same factor with its keys, and hence its table layout, in the
+   * given order. The keys must be a permutation of this factor's keys.
+   */
+  TableFactor reorder(const DiscreteKeys& keys) const;
+
+  /**
+   * Restrict the factor to the given assignment, returning a TableFactor over
+   * the keys that the assignment leaves free. Assigned keys that are not in
+   * this factor are ignored.
+   */
   DiscreteFactor::shared_ptr restrict(
       const DiscreteValues& assignment) const override;
 
@@ -380,6 +415,25 @@ class GTSAM_EXPORT TableFactor : public DiscreteFactor {
   double error(const HybridValues& values) const override;
 
   /// @}
+
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
+  /// @name Deprecated scope helpers
+  /// @{
+
+  /// @deprecated Sort both discreteKeys() results, then use
+  /// std::set_intersection instead.
+  DiscreteKeys contractDkeys(const TableFactor& factor) const;
+
+  /// @deprecated Sort both discreteKeys() results, then use std::set_difference
+  /// instead.
+  DiscreteKeys freeDkeys(const TableFactor& factor) const;
+
+  /// @deprecated Sort both discreteKeys() results, then use std::set_union
+  /// instead.
+  DiscreteKeys unionDkeys(const TableFactor& factor) const;
+
+  /// @}
+#endif
 
  private:
 #if GTSAM_ENABLE_BOOST_SERIALIZATION

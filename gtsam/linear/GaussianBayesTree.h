@@ -68,6 +68,29 @@ namespace gtsam {
     VectorValues optimize() const;
 
     /**
+     * Solve U x = rhs in a root-to-leaf traversal, where U is the upper
+     * triangular operator formed by the whitened conditional R and S blocks.
+     * The stored conditional right-hand sides are ignored. Missing variable
+     * blocks in rhs are zero; unknown keys, wrong dimensions, or nonfinite
+     * values throw std::invalid_argument.
+     *
+     * Requires nonsingular conditionals with finite, strictly positive diagonal
+     * noise (or no noise model). Constrained noise is unsupported and throws
+     * std::invalid_argument. Singular or nonfinite solutions throw
+     * IndeterminateSystemException. The tree and rhs remain unchanged.
+     */
+    VectorValues backSubstitute(const VectorValues& rhs) const;
+
+    /**
+     * Solve U^T y = rhs in a leaf-to-root traversal for the whitened triangular
+     * operator U defined by backSubstitute(). Child separator contributions are
+     * accumulated privately before each parent is solved, allowing independent
+     * subtrees to run in parallel. Sparse inputs, supported noise models, and
+     * exceptions follow backSubstitute(). The tree and rhs remain unchanged.
+     */
+    VectorValues backSubstituteTranspose(const VectorValues& rhs) const;
+
+    /**
      * Optimize along the gradient direction, with a closed-form computation to perform the line
      * search.  The gradient is computed about \f$ \delta x=0 \f$.
      *
@@ -142,19 +165,21 @@ namespace gtsam {
           .fullMatrix();
     }
 
-    /// Return the joint marginal information matrix on the requested keys.
+    /// Return the joint marginal information matrix in `queryKeys` order.
     JointMarginal jointMarginalInformation(const KeyVector& queryKeys) const;
 
-    /// Return the joint marginal covariance matrix on the requested keys.
+    /// Return the joint marginal covariance matrix in `queryKeys` order.
     JointMarginal jointMarginalCovariance(const KeyVector& queryKeys) const;
 
-    /// Return the joint marginal information matrix using a specific elimination rule.
+    /// Return joint marginal information in `queryKeys` order using an
+    /// elimination rule.
     JointMarginal jointMarginalInformation(const KeyVector& queryKeys,
                                           const Eliminate& eliminate) const {
       return internal::jointMarginalInformation(*this, queryKeys, eliminate);
     }
 
-    /// Return the joint marginal covariance matrix using a specific elimination rule.
+    /// Return joint marginal covariance in `queryKeys` order using an
+    /// elimination rule.
     JointMarginal jointMarginalCovariance(const KeyVector& queryKeys,
                                           const Eliminate& eliminate) const {
       return internal::jointMarginalCovariance(*this, queryKeys, eliminate);
@@ -167,3 +192,7 @@ namespace gtsam {
   };
 
 } //\ namespace gtsam
+
+#if GTSAM_ENABLE_BOOST_SERIALIZATION
+BOOST_CLASS_VERSION(gtsam::GaussianBayesTree, 1)
+#endif

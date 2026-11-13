@@ -1,0 +1,57 @@
+/*
+ * MyST flattens the README's <picture> element to its fallback <img>. Replace
+ * that fallback with the matching README artwork for the selected site theme.
+ */
+img[data-canonical-url="doc/images/gtsam-manifold-optimization-light.png"] {
+  /* MyST treats the linked README image as inline content by default. */
+  max-height: none !important;
+}
+
+html.dark
+  img[data-canonical-url="doc/images/gtsam-manifold-optimization-light.png"] {
+  content:
+    url("gtsam-manifold-optimization-dark.png") /
+    "GTSAM manifold optimization workflow: build a factor graph, linearize and solve in tangent spaces, retract to manifolds, and iterate to convergence.";
+}
+
+/* SFM landing page ------------------------------------------------------- */
+
+.sfm-hero img {
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 1rem;
+  box-shadow: 0 1rem 2.5rem rgb(15 23 42 / 16%);
+}
+
+.sfm-capability-grid .myst-card {
+  border-top: 0.25rem solid #7c3aed !important;
+}
+
+.sfm-fast-path {
+  border-left-width: 0.4rem !important;
+  background:
+    linear-gradient(135deg, rgb(109 40 217 / 10%), rgb(22 163 74 / 8%));
+}
+
+.sfm-guide-grid .myst-card {
+  height: 100%;
+}
+
+/* QP benchmark Plotly embeds ---------------------------------------------- */
+/* MyST supplies an inline aspect-ratio wrapper. Plotly's multi-panel charts
+ * need their full configured height, so override those inline dimensions. */
+div:has(> iframe[src*="/qp-plots/"]) {
+  display: block;
+  padding-bottom: 0 !important;
+}
+iframe[src*="/qp-plots/"] {
+  display: block;
+  position: relative !important;
+  width: 100%;
+  height: 620px !important;
+  border: 0;
+}
+iframe[src*="/qp-plots/mpc-success"] { height: 520px !important; }
+iframe[src*="/qp-plots/mpc-profile"],
+iframe[src*="/qp-plots/quad-profile"] { height: 820px !important; }
+iframe[src*="/qp-plots/quad-times"] { height: 580px !important; }
+iframe[src*="/qp-plots/g1-times"] { height: 630px !important; }

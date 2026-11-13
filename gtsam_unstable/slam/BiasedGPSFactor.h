@@ -15,25 +15,28 @@
  **/
 #pragma once
 
-#include <ostream>
-
+#include <gtsam/base/MatrixConstants.h>
 #include <gtsam/geometry/Pose3.h>
-#include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/nonlinear/NoiseModelFactorN.h>
+#include <gtsam/nonlinear/NonlinearFactor.h>
+
+#include <ostream>
 
 namespace gtsam {
 
   /**
    * A class to model GPS measurements, including a bias term which models
-   * common-mode errors and that can be partially corrected if other sensors are used
+   * common-mode errors and that can be partially corrected if other sensors are used.
+   * The error is pose.translation() + bias - measured, all in the navigation frame.
    * @ingroup slam
    */
-  class BiasedGPSFactor: public NoiseModelFactorN<Pose3, Point3> {
+  class BiasedGPSFactor
+      : public NoiseModelFactorT<Vector3, Pose3, Point3> {
 
   private:
 
     typedef BiasedGPSFactor This;
-    typedef NoiseModelFactorN<Pose3, Point3> Base;
+    typedef NoiseModelFactorT<Vector3, Pose3, Point3> Base;
 
     Point3 measured_; /** The measurement */
 
@@ -76,20 +79,15 @@ namespace gtsam {
     /** implement functions needed to derive from Factor */
 
     /** vector of errors */
-    Vector evaluateError(const Pose3& pose, const Point3& bias,
-        OptionalMatrixType H1, OptionalMatrixType H2) const override {
-
-      if (H1 || H2){
-        H1->resize(3,6); // jacobian wrt pose
-        (*H1) << Z_3x3,  pose.rotation().matrix();
-        H2->resize(3,3); // jacobian wrt bias
-        (*H2) << I_3x3;
-      }
-      return pose.translation() + bias - measured_;
+    Vector3 evaluateError(const Pose3& pose, const Point3& bias,
+                          OptionalMatrixType H1,
+                          OptionalMatrixType H2) const override {
+      if (H2) *H2 = I_3x3;
+      return pose.translation(H1) + bias - measured_;
     }
 
     /** return the measured */
-    const Point3 measured() const {
+    const Point3& measured() const {
       return measured_;
     }
 

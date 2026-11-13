@@ -26,6 +26,7 @@ macro(SET_PYTHON_TARGET_PROPERTIES PYTHON_TARGET OUTPUT_NAME OUTPUT_DIRECTORY)
         LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIRECTORY}"
         DEBUG_POSTFIX "" # Otherwise you will have a wrong name
         RELWITHDEBINFO_POSTFIX "" # Otherwise you will have a wrong name
+        MINSIZEREL_POSTFIX "" # Otherwise you will have a wrong name
         TIMING_POSTFIX "" # Otherwise you will have a wrong name
         PROFILING_POSTFIX "" # Otherwise you will have a wrong name
     )
@@ -40,8 +41,6 @@ endmacro()
 if(POLICY CMP0057)
     cmake_policy(SET CMP0057 NEW)
 endif()
-
-option(GTSAM_USE_SYSTEM_PYBIND "Find and use system-installed Pybind. If 'off', use the one bundled with GTSAM" OFF)
 
 if(GTSAM_USE_SYSTEM_PYBIND)
     # try to find pybind11 on system
@@ -63,6 +62,10 @@ add_custom_target(gtsam_unstable_header DEPENDS "${PROJECT_SOURCE_DIR}/gtsam_uns
 
 # ignoring the non-concrete types (type aliases)
 set(ignore
+    gtsam::Errors
+    "std::vector<double>"
+    "std::vector<gtsam::Vector>"
+    "std::vector<gtsam::AugmentedLagrangianSolverState>"
     gtsam::Point2
     gtsam::Point3
     gtsam::ISAM2ThresholdMapValue
@@ -92,6 +95,20 @@ set(ignore
     gtsam::gtsfm::KeypointsVector
     gtsam::gtsfm::SfmTrack2dVector)
 
+# PreintegratedImuMeasurements is already the configured backend specialization.
+# Skip registering that specialization a second time under its explicit name;
+# gtsam.tpl adds the explicit Python name as an alias after binding completes.
+if(GTSAM_LIEGROUP_PREINTEGRATION)
+    list(APPEND ignore
+        "gtsam::PreintegratedImuMeasurementsT<gtsam::LieGroupPreintegration>")
+elseif(GTSAM_TANGENT_PREINTEGRATION)
+    list(APPEND ignore
+        "gtsam::PreintegratedImuMeasurementsT<gtsam::TangentPreintegration>")
+else()
+    list(APPEND ignore
+        "gtsam::PreintegratedImuMeasurementsT<gtsam::ManifoldPreintegration>")
+endif()
+
 set(interface_headers
     ${PROJECT_SOURCE_DIR}/gtsam/gtsam.i
     ${PROJECT_SOURCE_DIR}/gtsam/base/base.i
@@ -100,18 +117,41 @@ set(interface_headers
     ${PROJECT_SOURCE_DIR}/gtsam/geometry/geometry.i
     ${PROJECT_SOURCE_DIR}/gtsam/geometry/cameras.i
     ${PROJECT_SOURCE_DIR}/gtsam/linear/linear.i
-    ${PROJECT_SOURCE_DIR}/gtsam/nonlinear/nonlinear.i
     ${PROJECT_SOURCE_DIR}/gtsam/nonlinear/values.i
+    ${PROJECT_SOURCE_DIR}/gtsam/nonlinear/nonlinear.i
+    ${PROJECT_SOURCE_DIR}/gtsam/nonlinear/nonlinear_continuous_time.i
     ${PROJECT_SOURCE_DIR}/gtsam/nonlinear/custom.i
     ${PROJECT_SOURCE_DIR}/gtsam/constrained/constrained.i
+    ${PROJECT_SOURCE_DIR}/gtsam/certifiable/certifiable.i
     ${PROJECT_SOURCE_DIR}/gtsam/symbolic/symbolic.i
     ${PROJECT_SOURCE_DIR}/gtsam/sam/sam.i
     ${PROJECT_SOURCE_DIR}/gtsam/slam/slam.i
+    ${PROJECT_SOURCE_DIR}/gtsam/slam/slam_synchronization.i
+    ${PROJECT_SOURCE_DIR}/gtsam/slam/slam_smart_projection.i
     ${PROJECT_SOURCE_DIR}/gtsam/sfm/sfm.i
     ${PROJECT_SOURCE_DIR}/gtsam/navigation/navigation.i
+    ${PROJECT_SOURCE_DIR}/gtsam/navigation/navigation_geometric.i
     ${PROJECT_SOURCE_DIR}/gtsam/basis/basis.i
     ${PROJECT_SOURCE_DIR}/gtsam/hybrid/hybrid.i
 )
+
+if(GTSAM_USE_MOSEK)
+    list(APPEND interface_headers
+        ${PROJECT_SOURCE_DIR}/gtsam/certifiable/certifiable_mosek.i
+    )
+    # Use pybind11's native STL conversions instead of container proxy classes.
+    list(APPEND ignore
+        "std::map<std::string, double>"
+        "std::map<gtsam::Key, gtsam::DenseIndex>")
+endif()
+
+if(GTSAM_ENABLE_CUDA)
+    list(APPEND interface_headers
+        ${PROJECT_SOURCE_DIR}/gtsam/linear/cuda/cuda_linear.i
+        ${PROJECT_SOURCE_DIR}/gtsam/nonlinear/cuda/cuda_nonlinear.i
+        ${PROJECT_SOURCE_DIR}/gtsam/sfm/cuda/cuda_sfm.i
+    )
+endif()
 
 set(GTSAM_PYTHON_TARGET gtsam_py)
 set(GTSAM_PYTHON_UNSTABLE_TARGET gtsam_unstable_py)
@@ -155,7 +195,7 @@ if(WIN32)
     )
     ADD_CUSTOM_COMMAND(TARGET ${GTSAM_PYTHON_TARGET} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${GTSAM_PYTHON_BUILD_DIRECTORY}/gtsam/${GTSAM_OUTPUT_NAME}.pyd"
+        "$<TARGET_FILE:${GTSAM_PYTHON_TARGET}>"
         "${GTSAM_PYTHON_BUILD_DIRECTORY}/gtsam/gtsam.pyd"
     )
     ADD_CUSTOM_COMMAND(TARGET ${GTSAM_PYTHON_TARGET} POST_BUILD
@@ -183,8 +223,19 @@ set(GTSAM_MODULE_PATH ${GTSAM_PYTHON_BUILD_DIRECTORY}/gtsam)
 copy_directory("${CMAKE_CURRENT_SOURCE_DIR}/gtsam"
         "${GTSAM_MODULE_PATH}")
 
+if(NOT GTSAM_ENABLE_CUDA)
+    file(REMOVE
+        "${GTSAM_MODULE_PATH}/tests/test_CudaGnc.py"
+        "${GTSAM_MODULE_PATH}/tests/test_CudaSfm.py"
+        "${GTSAM_MODULE_PATH}/tests/test_CudaSparseLevenbergMarquardt.py")
+endif()
+
 # Hack to get python test and util files copied every time they are modified
 file(GLOB GTSAM_PYTHON_TEST_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gtsam/tests/*.py")
+if(NOT GTSAM_ENABLE_CUDA)
+    list(FILTER GTSAM_PYTHON_TEST_FILES EXCLUDE REGEX
+        ".*/test_Cuda(Gnc|Sfm|SparseLevenbergMarquardt)\\.py$")
+endif()
 foreach(test_file ${GTSAM_PYTHON_TEST_FILES})
         get_filename_component(test_file_name ${test_file} NAME)
         configure_file(${test_file} "${GTSAM_MODULE_PATH}/tests/${test_file_name}" COPYONLY)
@@ -196,15 +247,21 @@ foreach(test_file ${GTSAM_PYTHON_TEST_FILES})
 endforeach()
 file(GLOB GTSAM_PYTHON_UTIL_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gtsam/utils/*.py")
 foreach(util_file ${GTSAM_PYTHON_UTIL_FILES})
-        configure_file(${util_file} "${GTSAM_MODULE_PATH}/utils/${test_file}" COPYONLY)
+        get_filename_component(util_file_name ${util_file} NAME)
+        configure_file(${util_file}
+                "${GTSAM_MODULE_PATH}/utils/${util_file_name}" COPYONLY)
 endforeach()
 file(GLOB GTSAM_PYTHON_PREAMBLE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gtsam/preamble/*.h")
-foreach(util_file ${GTSAM_PYTHON_PREAMBLE_FILES})
-        configure_file(${util_file} "${GTSAM_MODULE_PATH}/preamble/${test_file}" COPYONLY)
+foreach(preamble_file ${GTSAM_PYTHON_PREAMBLE_FILES})
+        get_filename_component(preamble_file_name ${preamble_file} NAME)
+        configure_file(${preamble_file}
+                "${GTSAM_MODULE_PATH}/preamble/${preamble_file_name}" COPYONLY)
 endforeach()
 file(GLOB GTSAM_PYTHON_SPECIALIZATION_FILES "${CMAKE_CURRENT_SOURCE_DIR}/gtsam/specializations/*.h")
-foreach(util_file ${GTSAM_PYTHON_SPECIALIZATION_FILES})
-        configure_file(${util_file} "${GTSAM_MODULE_PATH}/specializations/${test_file}" COPYONLY)
+foreach(specialization_file ${GTSAM_PYTHON_SPECIALIZATION_FILES})
+        get_filename_component(specialization_file_name ${specialization_file} NAME)
+        configure_file(${specialization_file}
+                "${GTSAM_MODULE_PATH}/specializations/${specialization_file_name}" COPYONLY)
 endforeach()
 
 # Common directory for data/datasets stored with the package.
@@ -215,6 +272,15 @@ file(COPY "${GTSAM_SOURCE_DIR}/examples/Data" DESTINATION "${GTSAM_MODULE_PATH}"
 set(GTSAM_PYTHON_DEPENDENCIES ${GTSAM_PYTHON_TARGET})
 
 set(GTSAM_PYTHON_INSTALL_EXTRA "")
+
+# Separator used when prepending the build directory to an existing PYTHONPATH.
+# This is a path-LIST separator, not a directory separator: ":" on UNIX and ";"
+# elsewhere. Mirrors GTWRAP_PATH_SEPARATOR in wrap/cmake/PybindWrap.cmake.
+if(UNIX)
+    set(GTSAM_PATH_SEPARATOR ":")
+else()
+    set(GTSAM_PATH_SEPARATOR ";")
+endif()
 
 separate_arguments(PYTEST_EXTRA_ARGS_LIST UNIX_COMMAND "${PYTEST_EXTRA_ARGS}")
 
@@ -314,23 +380,21 @@ if(GTSAM_UNSTABLE_BUILD_PYTHON)
         python-unstable-stubs
         COMMAND
         ${CMAKE_COMMAND} -E env
-        "PYTHONPATH=${GTSAM_PYTHON_BUILD_DIRECTORY}/$ENV{PYTHONPATH}"
+        "PYTHONPATH=${GTSAM_PYTHON_BUILD_DIRECTORY}${GTSAM_PATH_SEPARATOR}$ENV{PYTHONPATH}"
         ${PYTHON_EXECUTABLE} -m pybind11_stubgen -o . --enum-class-locations \"KernelFunctionType|NoiseFormat:gtsam.gtsam\" --enum-class-locations \"OrderingType:gtsam.gtsam.Ordering\" --numpy-array-use-type-var --ignore-all-errors gtsam_unstable
         DEPENDS ${GTSAM_PYTHON_DEPENDENCIES} ${GTSAM_PYTHON_TEST_FILES} ${GTSAM_PYTHON_UNSTABLE_TARGET}
         WORKING_DIRECTORY "${GTSAM_PYTHON_BUILD_DIRECTORY}/"
     )
 
-    if(NOT WIN32)
-        # Add the stubgen target as a dependency to the install target
-        list(APPEND GTSAM_PYTHON_INSTALL_EXTRA python-unstable-stubs)
-    endif()
+    # Add the stubgen target as a dependency to the install target
+    list(APPEND GTSAM_PYTHON_INSTALL_EXTRA python-unstable-stubs)
 
     # Custom make command to run all GTSAM_UNSTABLE Python tests
     add_custom_target(
         python-test-unstable
         COMMAND
           ${CMAKE_COMMAND} -E env # add package to python path so no need to install
-          "PYTHONPATH=${GTSAM_PYTHON_BUILD_DIRECTORY}/$ENV{PYTHONPATH}"
+          "PYTHONPATH=${GTSAM_PYTHON_BUILD_DIRECTORY}${GTSAM_PATH_SEPARATOR}$ENV{PYTHONPATH}"
         ${PYTHON_EXECUTABLE} -m pytest -v . ${PYTEST_EXTRA_ARGS_LIST}
         DEPENDS ${GTSAM_PYTHON_DEPENDENCIES} ${GTSAM_PYTHON_TEST_FILES}
         WORKING_DIRECTORY "${GTSAM_PYTHON_BUILD_DIRECTORY}/gtsam_unstable/tests"
@@ -341,16 +405,14 @@ add_custom_target(
         python-stubs
         COMMAND
           ${CMAKE_COMMAND} -E env
-          "PYTHONPATH=${GTSAM_PYTHON_BUILD_DIRECTORY}/$ENV{PYTHONPATH}"
+          "PYTHONPATH=${GTSAM_PYTHON_BUILD_DIRECTORY}${GTSAM_PATH_SEPARATOR}$ENV{PYTHONPATH}"
         ${PYTHON_EXECUTABLE} -m pybind11_stubgen -o . --enum-class-locations \"KernelFunctionType|NoiseFormat:gtsam.gtsam\" --enum-class-locations \"OrderingType:gtsam.gtsam.Ordering\" --numpy-array-use-type-var --ignore-all-errors gtsam
         DEPENDS ${GTSAM_PYTHON_DEPENDENCIES} ${GTSAM_PYTHON_TEST_FILES} ${GTSAM_PYTHON_TARGET}
         WORKING_DIRECTORY "${GTSAM_PYTHON_BUILD_DIRECTORY}/"
 )
 
-if(NOT WIN32)
-    # Add the stubgen target as a dependency to the install target
-    list(APPEND GTSAM_PYTHON_INSTALL_EXTRA python-stubs)
-endif()
+# Add the stubgen target as a dependency to the install target
+list(APPEND GTSAM_PYTHON_INSTALL_EXTRA python-stubs)
 
 # Add custom target so we can install with `make python-install`
 # Note below we make sure to install with --user iff not in a virtualenv
@@ -362,12 +424,42 @@ add_custom_target(${GTSAM_PYTHON_INSTALL_TARGET}
         WORKING_DIRECTORY ${GTSAM_PYTHON_BUILD_DIRECTORY}
         VERBATIM)
 
+# Package managers (conda-forge, pixi, spack) install into a prefix they own
+# and cannot use the `python-install` target above: outside a virtualenv it
+# passes --user, which installs to the user site instead of the prefix. Opt in
+# to installing the Python package into CMAKE_INSTALL_PREFIX as part of the
+# regular `install` target instead.
+option(GTSAM_PYTHON_INSTALL_INTO_PREFIX
+       "Install the Python package into CMAKE_INSTALL_PREFIX as part of `install`"
+       OFF)
+set(GTSAM_PYTHON_INSTALL_PREFIX "" CACHE PATH
+    "Override the Python installation prefix; empty follows CMAKE_INSTALL_PREFIX")
+
+if(GTSAM_PYTHON_INSTALL_INTO_PREFIX)
+  install(CODE "
+    set(_gtsam_python_prefix \"${GTSAM_PYTHON_INSTALL_PREFIX}\")
+    if(_gtsam_python_prefix STREQUAL \"\")
+      set(_gtsam_python_prefix \"\${CMAKE_INSTALL_PREFIX}\")
+    endif()
+    message(STATUS \"Installing the GTSAM Python package into \${_gtsam_python_prefix}\")
+    execute_process(
+      COMMAND \"${PYTHON_EXECUTABLE}\" -m pip install .
+              --no-deps --no-build-isolation --no-compile
+              --prefix \"\${_gtsam_python_prefix}\"
+      WORKING_DIRECTORY \"${GTSAM_PYTHON_BUILD_DIRECTORY}\"
+      RESULT_VARIABLE _gtsam_pip_result)
+    if(NOT _gtsam_pip_result EQUAL 0)
+      message(FATAL_ERROR \"Installing the GTSAM Python package failed\")
+    endif()
+  ")
+endif()
+
 # Custom make command to run all GTSAM Python tests
 add_custom_target(
         python-test
         COMMAND
           ${CMAKE_COMMAND} -E env # add package to python path so no need to install
-          "PYTHONPATH=${GTSAM_PYTHON_BUILD_DIRECTORY}/$ENV{PYTHONPATH}"
+          "PYTHONPATH=${GTSAM_PYTHON_BUILD_DIRECTORY}${GTSAM_PATH_SEPARATOR}$ENV{PYTHONPATH}"
           ${PYTHON_EXECUTABLE} -m pytest -v . ${PYTEST_EXTRA_ARGS_LIST}
           DEPENDS ${GTSAM_PYTHON_DEPENDENCIES} ${GTSAM_PYTHON_TEST_FILES}
           WORKING_DIRECTORY "${GTSAM_PYTHON_BUILD_DIRECTORY}/gtsam/tests")

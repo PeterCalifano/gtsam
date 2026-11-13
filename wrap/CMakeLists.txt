@@ -10,17 +10,18 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/GtwrapUtils.cmake)
 gtwrap_get_python_version(${WRAP_PYTHON_VERSION})
 
 # Set the variables to be used for the cmake config file.
-if(WIN32 AND NOT CYGWIN)
-  set(INSTALL_CMAKE_DIR CMake/${PROJECT_NAME})
-else()
-  set(INSTALL_CMAKE_DIR lib/cmake/${PROJECT_NAME})
-endif()
+# lib/cmake/<name>/ is one of the locations find_package searches on every
+# platform. The Windows layout used previously, CMake/<name>/, is not: CMake
+# looks in <prefix>/CMake/ but not in a package subdirectory below it, so
+# find_package(gtwrap) could never succeed there.
+set(INSTALL_CMAKE_DIR lib/cmake/${PROJECT_NAME})
 
 set(INSTALL_LIB_DIR lib/${PROJECT_NAME})
 set(INSTALL_BIN_DIR bin/${PROJECT_NAME})
 set(INSTALL_INCLUDE_DIR include/${PROJECT_NAME})
 
 option(GTWRAP_ADD_DOCSTRINGS "Whether to add docstrings to the Python bindings from Doxygen-generated XML located at {project_root}/xml" OFF)
+option(GTWRAP_USE_SYSTEM_PYBIND "Find and use system-installed pybind11 instead of installing the bundled copy" OFF)
 
 # ##############################################################################
 # Package Configuration
@@ -65,9 +66,11 @@ configure_file(${PROJECT_SOURCE_DIR}/templates/matlab_wrapper.tpl.in
 # for wrapping.
 install(DIRECTORY gtwrap DESTINATION "${GTWRAP_LIB_INSTALL_DIR}")
 
-# Install pybind11 directory to `CMAKE_INSTALL_PREFIX/lib/gtwrap/pybind11` This
-# will allow the gtwrapConfig.cmake file to load it later.
-install(DIRECTORY pybind11 DESTINATION "${GTWRAP_LIB_INSTALL_DIR}")
+# Install pybind11 so gtwrapConfig.cmake can load it when not using a system
+# installation.
+if(NOT GTWRAP_USE_SYSTEM_PYBIND)
+  install(DIRECTORY pybind11 DESTINATION "${GTWRAP_LIB_INSTALL_DIR}")
+endif()
 
 # Install wrapping scripts as binaries to `CMAKE_INSTALL_PREFIX/bin` so they can
 # be invoked for wrapping. We use DESTINATION (instead of TYPE) so we can

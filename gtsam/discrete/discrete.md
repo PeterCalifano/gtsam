@@ -1,4 +1,6 @@
-# Discrete Inference in GTSAM
+# Discrete
+
+> Discrete Inference in GTSAM
 
 The discrete module in GTSAM provides a comprehensive framework for probabilistic inference over discrete random variables. This module implements Bayesian networks, factor graphs, and efficient inference algorithms using decision trees and elimination methods.
 
@@ -116,7 +118,9 @@ Mathematical abstraction for algebraic operations on decision tree values, enabl
 Parses string representations of conditional probability signatures, enabling convenient model specification from text.
 
 ### TableDistribution
-Utility class for working with probability distributions represented as tables.
+Deprecated in GTSAM 4.3: construct a `DiscreteConditional` from a `TableFactor` instead, which stores the probabilities in the sparse table.
+
+**Notebook**: [TableDistribution.ipynb](doc/TableDistribution.ipynb)
 
 ## Example Workflows
 

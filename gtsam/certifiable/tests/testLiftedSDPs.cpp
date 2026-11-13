@@ -1,0 +1,807 @@
+/* ----------------------------------------------------------------------------
+
+ * GTSAM Copyright 2010, Georgia Tech Research Corporation,
+ * Atlanta, Georgia 30332-0415
+ * All Rights Reserved
+ * Authors: Frank Dellaert, et al. (see THANKS for the full author list)
+
+ * See LICENSE for the license information
+
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @file testLiftedSDPs.cpp
+ * @brief Tests for QCQP-backed lifted SDP objective assembly.
+ */
+
+#include <CppUnitLite/TestHarness.h>
+#include <gtsam/base/TestableAssertions.h>
+#include <gtsam/certifiable/LiftedSDPProblem.h>
+#include <gtsam/constrained/QcqpProblem.h>
+#include <gtsam/constrained/QpCost.h>
+#include <gtsam/geometry/Pose2.h>
+#include <gtsam/geometry/Pose3.h>
+#include <gtsam/geometry/Rot2.h>
+#include <gtsam/geometry/Unit3.h>
+#include <gtsam/inference/Symbol.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include <gtsam/nonlinear/Values.h>
+#include <gtsam/sam/QuadraticRangeFactor.h>
+#include <gtsam/slam/FrobeniusFactor.h>
+#include <gtsam/slam/RelativeTranslationFactor.h>
+
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <map>
+#include <stdexcept>
+#include <vector>
+
+using namespace gtsam;
+
+/* ************************************************************************* */
+namespace lifted_sdp_tests {
+
+constexpr double kPi = 3.141592653589793238462643383279502884;
+
+// Build a cycle of relative Rot2 measurements.
+NonlinearFactorGraph Rot2RingGraph(size_t numPoses, double delta) {
+  NonlinearFactorGraph graph;
+  for (size_t i = 0; i < numPoses; ++i) {
+    graph.emplace_shared<FrobeniusBetweenFactor<Rot2>>(
+        Symbol('x', i), Symbol('x', (i + 1) % numPoses),
+        Rot2::fromAngle(delta));
+  }
+  return graph;
+}
+
+// Create lifted QCQP values with a controlled angular perturbation.
+Values Rot2RingQcqpValues(size_t numPoses, double delta, double perturbation) {
+  Values values;
+  for (size_t i = 0; i < numPoses; ++i) {
+    insertQcqpValue<Rot2, 1>(
+        Symbol('x', i),
+        Rot2::fromAngle(i * delta + perturbation * static_cast<double>(i)),
+        &values);
+  }
+  return values;
+}
+
+// Build a cycle using relative measurements from the supplied poses.
+template <typename T>
+NonlinearFactorGraph PoseRingGraph(const std::vector<T>& poses) {
+  NonlinearFactorGraph graph;
+  for (size_t i = 0; i < poses.size(); ++i) {
+    const size_t j = (i + 1) % poses.size();
+    graph.emplace_shared<FrobeniusBetweenFactor<T>>(
+        Symbol('x', i), Symbol('x', j), poses[i].between(poses[j]));
+  }
+  return graph;
+}
+
+// Lift a sequence of manifold values into D=1 QCQP coordinates.
+template <typename T>
+Values PoseRingQcqpValues(const std::vector<T>& poses) {
+  Values values;
+  for (size_t i = 0; i < poses.size(); ++i) {
+    insertQcqpValue<T, 1>(Symbol('x', i), poses[i], &values);
+  }
+  return values;
+}
+
+// Create a closed Pose2 ring by repeatedly composing one body-frame step.
+std::vector<Pose2> Pose2RingPoses(size_t numPoses) {
+  const Pose2 step(2.0, 0.0, 2.0 * kPi / static_cast<double>(numPoses));
+  std::vector<Pose2> poses(numPoses);
+  for (size_t i = 1; i < numPoses; ++i) {
+    poses[i] = poses[i - 1].compose(step);
+  }
+  return poses;
+}
+
+// Create a closed Pose3 ring by repeatedly composing one body-frame step.
+std::vector<Pose3> Pose3RingPoses(size_t numPoses) {
+  const Pose3 step(Rot3::Rz(2.0 * kPi / static_cast<double>(numPoses)),
+                   Point3(2.0, 0.0, 0.0));
+  std::vector<Pose3> poses(numPoses);
+  for (size_t i = 1; i < numPoses; ++i) {
+    poses[i] = poses[i - 1].compose(step);
+  }
+  return poses;
+}
+
+// Apply deterministic local perturbations so the objective is nonzero.
+std::vector<Pose2> PerturbedPose2Values(const std::vector<Pose2>& poses) {
+  std::vector<Pose2> perturbed = poses;
+  for (size_t i = 0; i < perturbed.size(); ++i) {
+    const double scale = static_cast<double>(i);
+    perturbed[i] =
+        poses[i].retract(Vector3(0.01 * scale, -0.005 * scale, 0.003 * scale));
+  }
+  return perturbed;
+}
+
+// Apply deterministic local perturbations so the objective is nonzero.
+std::vector<Pose3> PerturbedPose3Values(const std::vector<Pose3>& poses) {
+  std::vector<Pose3> perturbed = poses;
+  for (size_t i = 0; i < perturbed.size(); ++i) {
+    const double scale = static_cast<double>(i);
+    Vector6 delta{0.002 * scale, -0.001 * scale, 0.0015 * scale,
+                  0.01 * scale,  -0.005 * scale, 0.004 * scale};
+    perturbed[i] = poses[i].retract(delta);
+  }
+  return perturbed;
+}
+
+// Assemble the local rank-one matrix in a Hessian factor's key order.
+Matrix BuildLocalX(const HessianFactor& H, const Values& values) {
+  std::vector<Vector> localValues;
+  DenseIndex totalDim = 0;
+  for (auto it = H.begin(); it != H.end(); ++it) {
+    Vector x = values.at<Matrix>(*it).col(0);
+    if (x.size() != H.getDim(it)) {
+      throw std::runtime_error("BuildLocalX: QCQP value dimension mismatch.");
+    }
+    totalDim += x.size();
+    localValues.push_back(std::move(x));
+  }
+
+  Matrix X_f = Matrix::Zero(totalDim, totalDim);
+  DenseIndex rowStart = 0;
+  for (const Vector& x_i : localValues) {
+    DenseIndex colStart = 0;
+    for (const Vector& x_j : localValues) {
+      X_f.block(rowStart, colStart, x_i.size(), x_j.size()) =
+          x_i * x_j.transpose();
+      colStart += x_j.size();
+    }
+    rowStart += x_i.size();
+  }
+  return X_f;
+}
+
+// Evaluate the lifted trace objective directly from rank-one matrices.
+double ComputeLiftedObjective(const QcqpProblem& problem,
+                              const Values& values) {
+  double objective = 0.0;
+  for (const auto& factor : problem.costs()) {
+    if (!factor) {
+      continue;
+    }
+
+    const auto* cost = dynamic_cast<const QpCost*>(factor.get());
+    if (!cost) {
+      throw std::runtime_error("ComputeLiftedObjective: expected QpCost.");
+    }
+
+    const HessianFactor& H = cost->hessianFactor();
+    if (H.linearTerm().norm() > 0.0 || H.constantTerm() != 0.0) {
+      throw std::runtime_error(
+          "ComputeLiftedObjective: linear/constant terms are not supported.");
+    }
+
+    const Matrix Q_f = H.information();
+    const Matrix X_f = BuildLocalX(H, values);
+    objective += 0.5 * Q_f.cwiseProduct(X_f).sum();
+  }
+  return objective;
+}
+
+// Verifies that lifting preserves the QCQP objective at a feasible assignment.
+TEST(LiftedSDPs, Rot2_QcqpObjectiveMatchesLiftedObjective) {
+  constexpr size_t N = 20;
+  const double delta = 2.0 * kPi / static_cast<double>(N);
+  constexpr double perturbation = 0.03;
+
+  const NonlinearFactorGraph graph = Rot2RingGraph(N, delta);
+  const QcqpProblem problem(graph);
+  const Values qcqpValues = Rot2RingQcqpValues(N, delta, perturbation);
+
+  const double qcqpObjective = problem.costs().error(qcqpValues);
+  const double sdpObjective = ComputeLiftedObjective(problem, qcqpValues);
+
+  std::cout << "qcqpObjective: " << qcqpObjective << std::endl;
+  std::cout << "sdpObjective: " << sdpObjective << std::endl;
+
+  EXPECT_DOUBLES_EQUAL(qcqpObjective, sdpObjective, 1e-12);
+}
+
+// Verifies that the Pose2 QCQP and its rank-one SDP lift have equal costs.
+TEST(LiftedSDPs, Pose2_QcqpObjectiveMatchesLiftedObjective) {
+  constexpr size_t N = 20;
+  const std::vector<Pose2> groundTruth = Pose2RingPoses(N);
+  const NonlinearFactorGraph graph = PoseRingGraph(groundTruth);
+  const QcqpProblem problem(graph);
+  const Values qcqpValues =
+      PoseRingQcqpValues(PerturbedPose2Values(groundTruth));
+
+  const double qcqpObjective = problem.costs().error(qcqpValues);
+  const double sdpObjective = ComputeLiftedObjective(problem, qcqpValues);
+
+  EXPECT_DOUBLES_EQUAL(qcqpObjective, sdpObjective, 1e-10);
+}
+
+// Verifies that the Pose3 QCQP and its rank-one SDP lift have equal costs.
+TEST(LiftedSDPs, Pose3_QcqpObjectiveMatchesLiftedObjective) {
+  constexpr size_t N = 20;
+  const std::vector<Pose3> groundTruth = Pose3RingPoses(N);
+  const NonlinearFactorGraph graph = PoseRingGraph(groundTruth);
+  const QcqpProblem problem(graph);
+  const Values qcqpValues =
+      PoseRingQcqpValues(PerturbedPose3Values(groundTruth));
+
+  const double qcqpObjective = problem.costs().error(qcqpValues);
+  const double sdpObjective = ComputeLiftedObjective(problem, qcqpValues);
+
+  EXPECT_DOUBLES_EQUAL(qcqpObjective, sdpObjective, 1e-10);
+}
+
+}  // namespace lifted_sdp_tests
+/* ************************************************************************* */
+
+#ifdef GTSAM_USE_MOSEK
+/* ************************************************************************* */
+namespace pose_ring_sdp_fixture {
+
+constexpr size_t kNumPoses = 20;
+constexpr double kRankOneEigenRatioThreshold = 1e5;
+constexpr double kPoseErrorTolerance = 1e-4;
+constexpr double kObjectiveTolerance = 1e-3;
+
+struct SdpSolutionSummary {
+  double objective = 0.0;
+  double minimumEigenvalueRatio = 0.0;
+  double maximumPoseError = 0.0;
+  bool finiteEigenvalueRatios = false;
+  bool repeatedQueriesMatch = false;
+};
+
+// Build an exactly consistent ring with a hard Frobenius prior on the first
+// pose.
+template <typename T>
+NonlinearFactorGraph ExactPoseRingGraph(const std::vector<T>& poses,
+                                        size_t frobeniusDimension) {
+  NonlinearFactorGraph graph;
+  const auto priorNoise = noiseModel::Constrained::All(frobeniusDimension);
+  const auto betweenNoise = noiseModel::Isotropic::Sigma(T::dimension, 0.01);
+  graph.emplace_shared<FrobeniusPrior<T>>(0, poses[0].matrix(), priorNoise);
+  for (size_t i = 0; i < poses.size(); ++i) {
+    const size_t j = (i + 1) % poses.size();
+    graph.emplace_shared<FrobeniusBetweenFactor<T>>(
+        i, j, poses[i].between(poses[j]), betweenNoise);
+  }
+  return graph;
+}
+
+// Solve an SDP and summarize its diagonal-block rank and recovery accuracy.
+template <typename T, typename SdpProblem>
+SdpSolutionSummary SolveAndSummarize(SdpProblem* sdp,
+                                     const std::vector<T>& groundTruth) {
+  const std::map<std::string, double> mosekParams{
+      {"intpntCoTolRelGap", 1e-10},
+      {"optimizerMaxTime", 1500.0},
+  };
+  if (!sdp->solve(mosekParams)) {
+    throw std::runtime_error("MOSEK did not return a readable solution.");
+  }
+
+  const std::vector<double> eigenvalueRatios = sdp->variableEVRs();
+  const Values qcqpValues = sdp->qcqpValues();
+  const Values repeatedQcqpValues = sdp->qcqpValues();
+  const std::vector<double> repeatedEigenvalueRatios = sdp->variableEVRs();
+  const bool finiteEigenvalueRatios =
+      std::all_of(eigenvalueRatios.begin(), eigenvalueRatios.end(),
+                  [](double ratio) { return std::isfinite(ratio); });
+  const bool repeatedRatiosMatch =
+      eigenvalueRatios.size() == repeatedEigenvalueRatios.size() &&
+      std::equal(eigenvalueRatios.begin(), eigenvalueRatios.end(),
+                 repeatedEigenvalueRatios.begin(),
+                 [](double first, double second) {
+                   return std::abs(first - second) <= 1e-12;
+                 });
+  const bool repeatedQueriesMatch =
+      repeatedRatiosMatch &&
+      assert_equal(qcqpValues, repeatedQcqpValues, 1e-12);
+
+  const auto recovered = extractQcqpValues<T, 1>(qcqpValues);
+  if (recovered.size() != groundTruth.size()) {
+    throw std::runtime_error(
+        "Recovered QCQP value count does not match ground truth.");
+  }
+  std::vector<double> poseErrors(recovered.size());
+  for (size_t index = 0; index < recovered.size(); ++index) {
+    poseErrors[index] =
+        groundTruth[index].localCoordinates(recovered[index].second).norm();
+  }
+
+  return {sdp->objectiveValue(),
+          *std::min_element(eigenvalueRatios.begin(), eigenvalueRatios.end()),
+          *std::max_element(poseErrors.begin(), poseErrors.end()),
+          finiteEigenvalueRatios, repeatedQueriesMatch};
+}
+
+// Recovery queries reject access before either SDP formulation has been solved.
+TEST(LiftedSDPs, RecoveryQueriesRequireSolve) {
+  const std::vector<Pose2> groundTruth =
+      lifted_sdp_tests::Pose2RingPoses(kNumPoses);
+  const QcqpProblem problem(ExactPoseRingGraph(groundTruth, 9));
+  LiftedSDPProblem<MonolithicSDP, MosekSDPSolver> monolithic(problem);
+  LiftedSDPProblem<ChordalSDP, MosekSDPSolver> chordal(
+      problem, ChordalOrderingType::Metis);
+
+  CHECK_EXCEPTION(monolithic.qcqpValues(), std::runtime_error);
+  CHECK_EXCEPTION(monolithic.variableEVRs(), std::runtime_error);
+  CHECK_EXCEPTION(chordal.qcqpValues(), std::runtime_error);
+  CHECK_EXCEPTION(chordal.variableEVRs(), std::runtime_error);
+}
+
+// Verifies rank-one Pose2 slices and matching monolithic/chordal solutions.
+TEST(LiftedSDPs, Pose2_MonolithicAndChordal) {
+  const std::vector<Pose2> groundTruth =
+      lifted_sdp_tests::Pose2RingPoses(kNumPoses);
+  const QcqpProblem problem(ExactPoseRingGraph(groundTruth, 9));
+
+  LiftedSDPProblem<MonolithicSDP, MosekSDPSolver> monolithic(problem);
+  LiftedSDPProblem<ChordalSDP, MosekSDPSolver> chordal(
+      problem, ChordalOrderingType::Metis);
+  const SdpSolutionSummary monolithicResult =
+      SolveAndSummarize(&monolithic, groundTruth);
+  const SdpSolutionSummary chordalResult =
+      SolveAndSummarize(&chordal, groundTruth);
+
+  EXPECT(monolithicResult.minimumEigenvalueRatio > kRankOneEigenRatioThreshold);
+  EXPECT(chordalResult.minimumEigenvalueRatio > kRankOneEigenRatioThreshold);
+  EXPECT(monolithicResult.finiteEigenvalueRatios);
+  EXPECT(chordalResult.finiteEigenvalueRatios);
+  EXPECT(monolithicResult.repeatedQueriesMatch);
+  EXPECT(chordalResult.repeatedQueriesMatch);
+  EXPECT(monolithicResult.maximumPoseError < kPoseErrorTolerance);
+  EXPECT(chordalResult.maximumPoseError < kPoseErrorTolerance);
+  EXPECT(monolithicResult.objective < kObjectiveTolerance);
+  EXPECT(chordalResult.objective < kObjectiveTolerance);
+  EXPECT_DOUBLES_EQUAL(monolithicResult.objective, chordalResult.objective,
+                       kObjectiveTolerance);
+
+  // Pose 0 is a fixed variable: it has no SDP block, but qcqpValues()
+  // returns it.
+  LONGS_EQUAL(kNumPoses - 1, monolithic.orderedKeys().size());
+  LONGS_EQUAL(kNumPoses - 1, chordal.orderedKeys().size());
+  LONGS_EQUAL(kNumPoses - 1, monolithic.variableEVRs().size());
+  EXPECT(!monolithic.orderedKeyDims().count(0));
+  EXPECT(monolithic.qcqpValues().exists(0));
+  EXPECT(chordal.qcqpValues().exists(0));
+}
+
+// Verifies rank-one Pose3 slices and matching monolithic/chordal solutions.
+TEST(LiftedSDPs, Pose3_MonolithicAndChordal) {
+  const std::vector<Pose3> groundTruth =
+      lifted_sdp_tests::Pose3RingPoses(kNumPoses);
+  const QcqpProblem problem(ExactPoseRingGraph(groundTruth, 16));
+
+  LiftedSDPProblem<MonolithicSDP, MosekSDPSolver> monolithic(problem);
+  LiftedSDPProblem<ChordalSDP, MosekSDPSolver> chordal(
+      problem, ChordalOrderingType::Metis);
+  const SdpSolutionSummary monolithicResult =
+      SolveAndSummarize(&monolithic, groundTruth);
+  const SdpSolutionSummary chordalResult =
+      SolveAndSummarize(&chordal, groundTruth);
+
+  EXPECT(monolithicResult.minimumEigenvalueRatio > kRankOneEigenRatioThreshold);
+  EXPECT(chordalResult.minimumEigenvalueRatio > kRankOneEigenRatioThreshold);
+  EXPECT(monolithicResult.finiteEigenvalueRatios);
+  EXPECT(chordalResult.finiteEigenvalueRatios);
+  EXPECT(monolithicResult.repeatedQueriesMatch);
+  EXPECT(chordalResult.repeatedQueriesMatch);
+  EXPECT(monolithicResult.maximumPoseError < kPoseErrorTolerance);
+  EXPECT(chordalResult.maximumPoseError < kPoseErrorTolerance);
+  EXPECT(monolithicResult.objective < kObjectiveTolerance);
+  EXPECT(chordalResult.objective < kObjectiveTolerance);
+  EXPECT_DOUBLES_EQUAL(monolithicResult.objective, chordalResult.objective,
+                       kObjectiveTolerance);
+}
+
+// Redundant constraints added to the QCQP are lifted like the others: the
+// exact Pose3 ring stays rank one and recovered, with the same objective as the
+// plain relaxation.
+TEST(LiftedSDPs, Pose3_RedundantConstraints) {
+  const std::vector<Pose3> groundTruth =
+      lifted_sdp_tests::Pose3RingPoses(kNumPoses);
+  const NonlinearFactorGraph graph = ExactPoseRingGraph(groundTruth, 16);
+  const QcqpProblem problem(graph, 1, /*useRedundantConstraints=*/true);
+  LONGS_EQUAL(QcqpProblem(graph).eConstraints().size() + 11 * kNumPoses,
+              problem.eConstraints().size());
+
+  LiftedSDPProblem<MonolithicSDP, MosekSDPSolver> monolithic(problem);
+  LiftedSDPProblem<ChordalSDP, MosekSDPSolver> chordal(
+      problem, ChordalOrderingType::Metis);
+  const SdpSolutionSummary monolithicResult =
+      SolveAndSummarize(&monolithic, groundTruth);
+  const SdpSolutionSummary chordalResult =
+      SolveAndSummarize(&chordal, groundTruth);
+
+  EXPECT(monolithicResult.minimumEigenvalueRatio > kRankOneEigenRatioThreshold);
+  EXPECT(chordalResult.minimumEigenvalueRatio > kRankOneEigenRatioThreshold);
+  EXPECT(monolithicResult.maximumPoseError < kPoseErrorTolerance);
+  EXPECT(chordalResult.maximumPoseError < kPoseErrorTolerance);
+  EXPECT(monolithicResult.objective < kObjectiveTolerance);
+  EXPECT(chordalResult.objective < kObjectiveTolerance);
+  EXPECT_DOUBLES_EQUAL(monolithicResult.objective, chordalResult.objective,
+                       kObjectiveTolerance);
+}
+
+}  // namespace pose_ring_sdp_fixture
+/* ************************************************************************* */
+
+/* ************************************************************************* */
+namespace application_sdp_fixture {
+
+const Key kR0 = Symbol('R', 0), kR1 = Symbol('R', 1);
+const Key kT0 = Symbol('t', 0), kT1 = Symbol('t', 1);
+const Key kLandmark = Symbol('l', 0), kDirection = Symbol('u', 0);
+
+// Build a small exact graph containing the rotation, relative-translation,
+// landmark-observation, and quadratic-range terms used by PR #2713.
+QcqpProblem ApplicationQcqp() {
+  NonlinearFactorGraph graph;
+  graph.emplace_shared<FrobeniusBetweenFactor<Rot2>>(kR0, kR1,
+                                                     Rot2::fromAngle(0.2));
+  graph.emplace_shared<RelativeTranslationFactor2>(kR0, kT0, kT1,
+                                                   Vector2(1.0, 0.0), 2.0);
+  graph.emplace_shared<RelativeTranslationFactor2>(kR0, kT0, kLandmark,
+                                                   Vector2(2.0, 1.0), 1.5);
+  graph.emplace_shared<QuadraticRangeFactor2>(kT1, kLandmark, kDirection,
+                                              std::sqrt(2.0), 3.0);
+
+  QcqpProblem problem(graph, 1);
+  problem.addConstraint(LinearConstraint::Equal(
+      JacobianFactor(kR0, Matrix2::Identity(), Vector2(1.0, 0.0))));
+  problem.addConstraint(LinearConstraint::Equal(
+      JacobianFactor(kT0, Matrix2::Identity(), Vector2::Zero())));
+  return problem;
+}
+
+struct ApplicationSolution {
+  bool solved;
+  double objective;
+  size_t valueCount;
+  std::vector<double> evrs;
+};
+
+template <typename Solver>
+ApplicationSolution SolveApplication(Solver* solver) {
+  const std::map<std::string, double> params{{"optimizerMaxTime", 60.0}};
+  const bool solved = solver->solve(params);
+  return {solved, solver->objectiveValue(), solver->qcqpValues().size(),
+          solver->variableEVRs()};
+}
+
+// Both MOSEK formulations solve a D=1 graph containing every new QCQP factor
+// role added by PR #2713 and recover all six keyed variables. The anchors
+// R0 = [1, 0] and T0 = 0 are unary I x = v constraints, so R0 and T0 are fixed
+// variables without SDP blocks.
+TEST(LiftedSDPs, Pr2713ApplicationFactorsMonolithicAndChordal) {
+  const QcqpProblem problem = ApplicationQcqp();
+  MosekMonolithicSDP monolithic(problem);
+  MosekChordalSDP chordal(problem, ChordalOrderingType::Metis);
+  for (const KeyVector& keys :
+       {monolithic.orderedKeys(), chordal.orderedKeys()}) {
+    LONGS_EQUAL(4, keys.size());
+    EXPECT(std::find(keys.begin(), keys.end(), kR0) == keys.end());
+    EXPECT(std::find(keys.begin(), keys.end(), kT0) == keys.end());
+  }
+  const ApplicationSolution monolithicResult = SolveApplication(&monolithic);
+  const ApplicationSolution chordalResult = SolveApplication(&chordal);
+  for (const ApplicationSolution* result :
+       {&monolithicResult, &chordalResult}) {
+    EXPECT(result->solved);
+    EXPECT(result->objective < 1e-5);
+    EXPECT_LONGS_EQUAL(6, result->valueCount);
+    EXPECT_LONGS_EQUAL(4, result->evrs.size());
+    EXPECT(std::all_of(result->evrs.begin(), result->evrs.end(),
+                       [](double evr) { return evr > 1e3; }));
+  }
+}
+
+}  // namespace application_sdp_fixture
+/* ************************************************************************* */
+
+/* ************************************************************************* */
+namespace natural_form_fixture {
+
+// The constant coordinate preserves the nonzero optimum, anchor, and recovery.
+TEST(LiftedSDPs, NoisyRot2Ring) {
+  constexpr size_t count = 4;
+  constexpr double delta = 0.2;
+  QcqpProblem problem(lifted_sdp_tests::Rot2RingGraph(count, delta), 1);
+  problem.addConstraint(LinearConstraint::Equal(
+      JacobianFactor(Symbol('x', 0), Matrix2::Identity(), Vector2(0.6, 0.8))));
+  // Each Frobenius edge costs 2*(1-cos(delta)); the total winding is zero.
+  const double expected = 2.0 * count * (1.0 - std::cos(delta));
+  auto check = [&](auto* solver) {
+    EXPECT(solver->solve());
+    EXPECT_DOUBLES_EQUAL(expected, solver->objectiveValue(), 1e-6);
+    const Values values = solver->qcqpValues();
+    EXPECT_DOUBLES_EQUAL(expected, problem.costs().error(values), 1e-6);
+    EXPECT(assert_equal(Vector2(0.6, 0.8),
+                        Vector(values.at<Matrix>(Symbol('x', 0)).col(0)),
+                        1e-6));
+    EXPECT(assert_equal(values, solver->qcqpValues(), 1e-12));
+    for (double ratio : solver->variableEVRs()) EXPECT(ratio > 1e5);
+  };
+  MosekMonolithicSDP monolithic(problem);
+  check(&monolithic);
+  for (const auto ordering :
+       {ChordalOrderingType::Colamd, ChordalOrderingType::Metis}) {
+    MosekChordalSDP chordal(problem, ordering);
+    check(&chordal);
+    EXPECT_DOUBLES_EQUAL(monolithic.objectiveValue(), chordal.objectiveValue(),
+                         1e-6);
+  }
+}
+
+// Minimize half the squared norm with a prescribed, scaled squared leading
+// entry per key. Different block dimensions exercise rectangular views.
+QcqpProblem NormProblem(size_t count, bool connected, double firstSquaredNorm) {
+  NonlinearFactorGraph costs;
+  if (connected) {
+    costs.emplace_shared<QpCost>(HessianFactor(
+        0, 1, Matrix2::Identity(), Matrix::Zero(2, 3), Vector2::Zero(),
+        Matrix3::Identity(), Vector3::Zero(), 0.0));
+  } else {
+    for (size_t key = 0; key < count; ++key) {
+      const size_t dimension = key + 2;
+      costs.emplace_shared<QpCost>(
+          HessianFactor(key, Matrix::Identity(dimension, dimension),
+                        Vector::Zero(dimension), 0.0));
+    }
+  }
+  NonlinearEqualityConstraints constraints;
+  for (size_t key = 0; key < count; ++key) {
+    const double scale = key == 0 ? -3.0 : 2.0;
+    Matrix A = Matrix::Zero(key + 2, key + 2);
+    A(0, 0) = scale;
+    constraints.push_back(
+        QuadraticConstraint::Equal(key, A,
+                                   scale * (key == 0 ? firstSquaredNorm : 1.0))
+            .createEqualityFactor());
+  }
+  return QcqpProblem(costs, constraints);
+}
+
+void CheckNormProblem(size_t count, bool connected, double firstSquaredNorm,
+                      TestResult& result_, const std::string& name_) {
+  const auto problem = NormProblem(count, connected, firstSquaredNorm);
+  const double expected = 0.5 * (firstSquaredNorm + count - 1);
+  auto check = [&](auto* solver) {
+    EXPECT(solver->solve());
+    EXPECT_DOUBLES_EQUAL(expected, solver->objectiveValue(), 1e-6);
+    const Values values = solver->qcqpValues();
+    EXPECT_LONGS_EQUAL(count, values.size());
+    for (size_t key = 0; key < count; ++key) {
+      EXPECT_LONGS_EQUAL(key + 2, solver->orderedKeyDims().at(key));
+      const Vector recovered = values.at<Matrix>(key).col(0);
+      // The relaxation is sign-symmetric in each key, so only |y_0| <=
+      // sqrt(X_00) and the zero tail are determined.
+      const double squaredNorm = key == 0 ? firstSquaredNorm : 1.0;
+      EXPECT(std::abs(recovered(0)) <= std::sqrt(squaredNorm) + 1e-6);
+      EXPECT(assert_equal(Vector(Vector::Zero(key + 1)),
+                          Vector(recovered.tail(key + 1)), 1e-6));
+    }
+  };
+  MosekMonolithicSDP monolithic(problem);
+  check(&monolithic);
+  for (const auto ordering :
+       {ChordalOrderingType::Colamd, ChordalOrderingType::Metis}) {
+    MosekChordalSDP chordal(problem, ordering);
+    check(&chordal);
+  }
+}
+
+// Coupled keys of different sizes read rectangular off-diagonal blocks.
+TEST(LiftedSDPs, NormProblemRectangularViews) {
+  CheckNormProblem(2, true, 1.0, result_, name_);
+  CheckNormProblem(2, true, 4.0, result_, name_);
+}
+
+// One-key cones and separate components retain their keyed results.
+TEST(LiftedSDPs, NormProblemSingleKeyAndDisconnected) {
+  CheckNormProblem(1, false, 1.0, result_, name_);
+  CheckNormProblem(2, false, 1.0, result_, name_);
+}
+
+// Linear and constant QpCost terms read the lifted vector x_i (row-0 slice)
+// and the constant:
+// 1/2||t - p||^2 + 1/2||t - q||^2 is minimized at t=(p+q)/2.
+TEST(LiftedSDPs, LinearAndConstantCost) {
+  const Vector2 p(1.0, 0.0), q(0.0, 1.0);
+  NonlinearFactorGraph costs;
+  costs.emplace_shared<QpCost>(HessianFactor(
+      0, Matrix(2.0 * Matrix2::Identity()), Vector(p + q),
+      p.squaredNorm() + q.squaredNorm()));
+  const QcqpProblem problem(costs, NonlinearEqualityConstraints());
+
+  const double expected = 0.25 * (p - q).squaredNorm();
+  auto check = [&](auto* solver) {
+    EXPECT(solver->solve());
+    EXPECT_DOUBLES_EQUAL(expected, solver->objectiveValue(), 1e-6);
+    const Values values = solver->qcqpValues();
+    EXPECT(assert_equal(Vector2(0.5, 0.5), Vector(values.at<Matrix>(0).col(0)),
+                        1e-6));
+    EXPECT_DOUBLES_EQUAL(expected, problem.costs().error(values), 1e-6);
+  };
+  MosekMonolithicSDP monolithic(problem);
+  check(&monolithic);
+  MosekChordalSDP chordal(problem, ChordalOrderingType::Colamd);
+  check(&chordal);
+}
+
+// A linear constraint term reads the lifted vector x_i (row-0 slice):
+// projecting p onto the circle ||t - c||^2 = r^2, written
+// t't + 2a't = r^2 - c'c with a = -c, is exact.
+TEST(LiftedSDPs, LinearConstraintTerm) {
+  const Vector2 p(4.0, 5.0), c(1.0, 1.0);
+  constexpr double r = 1.0;
+  NonlinearFactorGraph costs;
+  costs.emplace_shared<QpCost>(HessianFactor(0, Matrix(Matrix2::Identity()),
+                                             Vector(p), p.squaredNorm()));
+  QcqpProblem problem(costs, NonlinearEqualityConstraints());
+  problem.addConstraint(QuadraticConstraint::Equal(
+      0, Matrix2::Identity(), Vector(-c), r * r - c.squaredNorm()));
+
+  const double distance = (p - c).norm();
+  const double expected = 0.5 * (distance - r) * (distance - r);
+  const Vector2 projection = c + r * (p - c) / distance;
+  auto check = [&](auto* solver) {
+    EXPECT(solver->solve());
+    EXPECT_DOUBLES_EQUAL(expected, solver->objectiveValue(), 1e-6);
+    const Values values = solver->qcqpValues();
+    EXPECT(assert_equal(projection, Vector(values.at<Matrix>(0).col(0)), 1e-5));
+    EXPECT(solver->variableEVRs().front() > 1e5);
+  };
+  MosekMonolithicSDP monolithic(problem);
+  check(&monolithic);
+  MosekChordalSDP chordal(problem, ChordalOrderingType::Colamd);
+  check(&chordal);
+}
+
+// Boundary equalities retain the descriptor's inequality sense, but both SDP
+// formulations must enforce equality, including for negated coefficients.
+TEST(LiftedSDPs, QuadraticBoundaryEquality) {
+  const Matrix A = Matrix2::Identity();
+  for (double sign : {1.0, -1.0}) {
+    for (bool greaterEqual : {false, true}) {
+      const auto constraint = greaterEqual
+                                  ? QuadraticConstraint::GreaterEqual(
+                                        0, Matrix(sign * A), sign)
+                                  : QuadraticConstraint::LessEqual(
+                                        0, Matrix(sign * A), sign);
+      // Choose a target strictly inside the original inequality, so leaving
+      // it as an inequality would give objective zero instead of one half.
+      const bool exterior = greaterEqual == (sign > 0.0);
+      const Vector2 target{exterior ? 2.0 : 0.0, 0.0};
+      NonlinearFactorGraph costs;
+      costs.emplace_shared<QpCost>(HessianFactor(
+          0, A, Vector(target), target.squaredNorm()));
+      NonlinearEqualityConstraints equalities;
+      equalities.push_back(
+          greaterEqual
+              ? constraint.createInequalityFactor()->createEqualityConstraint()
+              : constraint.createEqualityFactor());
+      const QcqpProblem problem(costs, equalities);
+      auto check = [&](auto* solver) {
+        EXPECT(solver->solve());
+        EXPECT_DOUBLES_EQUAL(0.5, solver->objectiveValue(), 1e-6);
+      };
+      MosekMonolithicSDP monolithic(problem);
+      check(&monolithic);
+      MosekChordalSDP chordal(problem, ChordalOrderingType::Colamd);
+      check(&chordal);
+    }
+  }
+}
+
+}  // namespace natural_form_fixture
+/* ************************************************************************* */
+namespace fixed_variable_fixture {
+
+constexpr size_t kCount = 4;
+constexpr double kDelta = 0.2;
+const Key x0 = Symbol('x', 0), x1 = Symbol('x', 1);
+
+// A noisy Rot2 ring, so the optimum is nonzero.
+NonlinearFactorGraph RingWithHardPriors(
+    const std::vector<std::pair<Key, Rot2>>& priors) {
+  NonlinearFactorGraph graph = lifted_sdp_tests::Rot2RingGraph(kCount, kDelta);
+  for (const auto& [key, value] : priors) {
+    graph.emplace_shared<FrobeniusPrior<Rot2>>(
+        key, value.matrix(), noiseModel::Constrained::All(4));
+  }
+  return graph;
+}
+
+// Solve both formulations and check that the SDP objective equals the QCQP
+// cost of the recovered values, i.e. that substitution kept the objective
+// exact, and that the fixed variables are recovered but not lifted.
+void CheckFixedVariables(const QcqpProblem& problem,
+                         const std::vector<std::pair<Key, Rot2>>& fixed,
+                         double expectedObjective, TestResult& result_,
+                         const std::string& name_) {
+  auto check = [&](auto* solver) {
+    const KeyVector& keys = solver->orderedKeys();
+    LONGS_EQUAL(kCount - fixed.size(), keys.size());
+    LONGS_EQUAL(kCount - fixed.size(), solver->orderedKeyDims().size());
+    for (const auto& [key, value] : fixed) {
+      EXPECT(std::find(keys.begin(), keys.end(), key) == keys.end());
+    }
+    EXPECT(solver->solve());
+    LONGS_EQUAL(kCount - fixed.size(), solver->variableEVRs().size());
+    const Values values = solver->qcqpValues();
+    LONGS_EQUAL(kCount, values.size());
+    for (const auto& [key, value] : fixed) {
+      EXPECT(assert_equal(qcqpValue(value), values.at<Matrix>(key), 1e-12));
+    }
+    EXPECT_DOUBLES_EQUAL(expectedObjective, solver->objectiveValue(), 1e-6);
+    EXPECT_DOUBLES_EQUAL(problem.costs().error(values),
+                         solver->objectiveValue(), 1e-6);
+  };
+  MosekMonolithicSDP monolithic(problem);
+  check(&monolithic);
+  MosekChordalSDP chordal(problem, ChordalOrderingType::Colamd);
+  check(&chordal);
+}
+
+// A hard FrobeniusPrior stays the QCQP constraint x0 = v; the SDP substitutes
+// x0 out, and its two ring edges become unary costs on x1 and x3.
+TEST(LiftedSDPs, HardFrobeniusPriorIsFixedVariable) {
+  const std::vector<std::pair<Key, Rot2>> fixed{{x0, Rot2::fromAngle(0.3)}};
+  const QcqpProblem problem(RingWithHardPriors(fixed));
+  const bool hasAnchorConstraint = std::any_of(
+      problem.eConstraints().begin(), problem.eConstraints().end(),
+      [](const auto& factor) {
+        return dynamic_cast<const LinearEqualityConstraintFactor*>(
+                   factor.get()) != nullptr;
+      });
+  EXPECT(hasAnchorConstraint);
+  // Each Frobenius edge costs 2*(1-cos(delta)); the total winding is zero.
+  CheckFixedVariables(problem, fixed, 2.0 * kCount * (1.0 - std::cos(kDelta)),
+                      result_, name_);
+}
+
+// With x0 and x1 both fixed, their edge involves fixed variables only. Its
+// cost is a constant that the SDP objective keeps: the edge measures kDelta,
+// but the anchors differ by 0.5.
+TEST(LiftedSDPs, FixedVariableConstantIsKept) {
+  const std::vector<std::pair<Key, Rot2>> fixed{{x0, Rot2::fromAngle(0.0)},
+                                                {x1, Rot2::fromAngle(0.5)}};
+  const QcqpProblem problem(RingWithHardPriors(fixed));
+  // An edge with angle error e costs 2*(1-cos(e)). The errors around the ring
+  // sum to -kCount*kDelta = -0.8. The fixed edge x0-x1 has error
+  // 0.5 - kDelta = 0.3, so the three free edges share -1.1 equally.
+  const double fixedError = 0.5 - kDelta;
+  const double freeError = (kCount * kDelta + fixedError) / 3.0;
+  const double expected = 2.0 * (1.0 - std::cos(fixedError)) +
+                          3.0 * 2.0 * (1.0 - std::cos(freeError));
+  CheckFixedVariables(problem, fixed, expected, result_, name_);
+}
+
+// Only an identity I x = v fixes a variable: 2 x = 2v is lifted as before.
+TEST(LiftedSDPs, NonIdentityUnaryEqualityIsNotFixed) {
+  QcqpProblem problem(lifted_sdp_tests::Rot2RingGraph(kCount, kDelta), 1);
+  problem.addConstraint(LinearConstraint::Equal(JacobianFactor(
+      x0, Matrix(2.0 * Matrix2::Identity()), Vector2(1.2, 1.6))));
+  MosekMonolithicSDP solver(problem);
+  LONGS_EQUAL(kCount, solver.orderedKeys().size());
+  EXPECT(solver.solve());
+  EXPECT(assert_equal(Vector2(0.6, 0.8),
+                      Vector(solver.qcqpValues().at<Matrix>(x0).col(0)),
+                      1e-6));
+}
+
+}  // namespace fixed_variable_fixture
+/* ************************************************************************* */
+#endif
+
+int main() {
+  TestResult tr;
+  return TestRegistry::runAllTests(tr);
+}

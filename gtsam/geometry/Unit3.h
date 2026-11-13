@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include <gtsam/geometry/Point2.h>
 #include <gtsam/geometry/Point3.h>
 #include <gtsam/base/Manifold.h>
@@ -31,6 +33,7 @@
 
 #include <random>
 #include <string>
+#include <tuple>
 
 #ifdef GTSAM_USE_TBB
 #include <mutex> // std::mutex
@@ -136,7 +139,20 @@ public:
   /// Return unit-norm Vector
   Vector3 unitVector(OptionalJacobian<3, 2> H = {}) const;
 
-  /// Return scaled direction as Point3
+  /**
+   * Return this direction scaled by a magnitude, i.e. magnitude * unitVector().
+   * Useful to reconstruct a physical vector from a direction and a known (or
+   * separately estimated) magnitude, e.g. a gravity or magnetic field vector.
+   * @param magnitude scale applied to the unit vector
+   * @param H_this optional 3x2 Jacobian wrt this direction
+   * @param H_magnitude optional 3x1 Jacobian wrt the magnitude
+   * @sa operator*(double, const Unit3&), which returns the same value
+   *     without Jacobians
+   */
+  Vector3 scaled(double magnitude, OptionalJacobian<3, 2> H_this = {},
+                 OptionalJacobian<3, 1> H_magnitude = {}) const;
+
+  /// Return scaled direction as Point3 (no Jacobians; see scaled())
   friend Point3 operator*(double s, const Unit3& d) {
     return Point3(s * d.p_);
   }
@@ -186,6 +202,14 @@ public:
   /// The local coordinates function
   Vector2 localCoordinates(const Unit3& s) const;
 
+  /**
+   * Local coordinates with derivatives in the tangent bases of this and s.
+   * Derivatives are undefined at the antipode; requesting them there throws
+   * std::domain_error. The value-only overload retains its antipodal convention.
+   */
+  Vector2 localCoordinates(const Unit3& s, OptionalJacobian<2, 2> H1,
+                           OptionalJacobian<2, 2> H2 = {}) const;
+
   /// @}
 
 #ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
@@ -209,9 +233,6 @@ private:
 #endif
 
   /// @}
-
-public:
-  GTSAM_MAKE_ALIGNED_OPERATOR_NEW
 };
 
 /// cross product Unit3 x Unit3
@@ -230,7 +251,66 @@ GTSAM_EXPORT Point3 cross(const Point3& p, const Unit3& q,
                           OptionalJacobian<3, 2> H_q = {});
 
 /// Define GTSAM traits
-template<> struct traits<Unit3> : public internal::Manifold<Unit3> {
+/**
+ * QCQP traits for the unit sphere S^2.
+ *
+ * The lift is a relaxation of the sphere: at D = 3 the row is a unit vector in
+ * R^3, and at D > 3 it is in S^{D-1}, which is the lifted sphere the
+ * Burer-Monteiro method searches over.
+ */
+template <>
+struct traits<Unit3> : public internal::Manifold<Unit3> {
+  /// Dimension of the D=1 QCQP vector p.
+  inline constexpr static int QcqpVectorDim = 3;
+
+  /// Lift a direction to a 1-by-D row, zero-padded above the ambient dimension.
+  template <int D = 1>
+  static Matrix QcqpValue(const Unit3& value) {
+    if constexpr (D == 1) {
+      return value.unitVector();
+    } else if constexpr (D >= 3) {
+      Matrix X = Matrix::Zero(1, D);
+      X.block(0, 0, 1, 3) = value.unitVector().transpose();
+      return X;
+    } else {
+      throw std::invalid_argument(
+          "traits<Unit3>::QcqpValue supports D=1 and D>=3.");
+    }
+  }
+
+  /// The single unit-norm constraint, `||X||^2 = 1`.
+  template <int D = 1>
+  static std::vector<std::tuple<Matrix, Vector, double>> QcqpConstraints() {
+    if constexpr (D == 1) {
+      return {{Matrix::Identity(3, 3), Vector(), 1.0}};
+    } else if constexpr (D >= 3) {
+      return {{Matrix::Identity(1, 1), Vector(), 1.0}};
+    } else {
+      throw std::invalid_argument(
+          "traits<Unit3>::QcqpConstraints supports D=1 and D>=3.");
+    }
+  }
+
+  /// Recover a direction by normalizing the leading three entries.
+  template <int D = 1>
+  static Unit3 FromQcqpValue(const Matrix& X) {
+    if constexpr (D == 1) {
+      if (X.rows() != QcqpVectorDim || X.cols() != 1) {
+        throw std::invalid_argument(
+            "traits<Unit3>::FromQcqpValue requires a 3-by-1 matrix.");
+      }
+      return Unit3(Point3(X.col(0)));
+    } else if constexpr (D >= 3) {
+      if (X.rows() != 1 || X.cols() != D) {
+        throw std::invalid_argument(
+            "traits<Unit3>::FromQcqpValue requires a 1-by-D matrix.");
+      }
+      return Unit3(Point3(X.block(0, 0, 1, 3).transpose()));
+    } else {
+      throw std::invalid_argument(
+          "traits<Unit3>::FromQcqpValue supports D=1 and D>=3.");
+    }
+  }
 };
 
 template<> struct traits<const Unit3> : public internal::Manifold<Unit3> {

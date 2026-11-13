@@ -18,16 +18,17 @@
  * @author  Frank Dellaert
  */
 
-#include <gtsam/linear/GaussianFactorGraph.h>
-#include <gtsam/linear/GaussianBayesTree.h>
-#include <gtsam/linear/GaussianEliminationTree.h>
-#include <gtsam/linear/GaussianJunctionTree.h>
-#include <gtsam/linear/HessianFactor.h>
-#include <gtsam/inference/FactorGraph-inst.h>
-#include <gtsam/inference/EliminateableFactorGraph-inst.h>
 #include <gtsam/base/debug.h>
 #include <gtsam/base/timing.h>
-#include <gtsam/base/cholesky.h>
+#include <gtsam/inference/EliminateableFactorGraph-inst.h>
+#include <gtsam/inference/FactorGraph-inst.h>
+#include <gtsam/linear/GaussianBayesTree.h>
+#include <gtsam/linear/GaussianEliminationTree.h>
+#include <gtsam/linear/GaussianFactorGraph.h>
+#include <gtsam/linear/GaussianJunctionTree.h>
+#include <gtsam/linear/HessianFactor.h>
+
+#include <Eigen/Cholesky>
 
 using namespace std;
 using namespace gtsam;
@@ -57,6 +58,7 @@ namespace gtsam {
   std::map<Key, size_t> GaussianFactorGraph::getKeyDimMap() const {
     map<Key, size_t> spec;
     for (const GaussianFactor::shared_ptr& gf : *this) {
+      if (!gf) continue;
       for (GaussianFactor::const_iterator it = gf->begin(); it != gf->end(); it++) {
         map<Key,size_t>::iterator it2 = spec.find(*it);
         if ( it2 == spec.end() ) {
@@ -356,19 +358,7 @@ namespace gtsam {
     Scatter scatter(*this);
     HessianFactor combined(*this, scatter);
 
-    // TODO(frank): cast to large dynamic matrix :-(
-    // NOTE(frank): info only valid (I think) in upper triangle. No problem for LLT...
-    Matrix augmented = combined.info().selfadjointView();
-
-    // Do Cholesky Factorization
-    size_t n = augmented.rows() - 1;
-    auto AtA = augmented.topLeftCorner(n, n);
-    auto eta = augmented.topRightCorner(n, 1);
-    Eigen::LLT<Matrix, Eigen::Upper> llt(AtA);
-
-    // Solve and convert, re-using scatter data structure
-    Vector solution = llt.solve(eta);
-    return VectorValues(solution, scatter);
+    return combined.solve();
   }
 
   /* ************************************************************************* */

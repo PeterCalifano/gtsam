@@ -18,7 +18,9 @@
  */
 
 #include <gtsam/base/Vector.h>
+#include <gtsam/discrete/DecisionTreeFactor.h>
 #include <gtsam/discrete/DiscreteFactor.h>
+#include <gtsam/discrete/TableFactor.h>
 #include <gtsam/hybrid/HybridValues.h>
 
 #include <cmath>
@@ -69,6 +71,37 @@ AlgebraicDecisionTree<Key> DiscreteFactor::errorTree() const {
     errors.push_back(error(assignment));
   }
   return AlgebraicDecisionTree<Key>(dkeys, errors);
+}
+
+/* ************************************************************************ */
+std::vector<std::pair<DiscreteValues, double>> DiscreteFactor::enumerate()
+    const {
+  // Reverse the keys to make the Cartesian product order more natural.
+  const DiscreteKeys keys = discreteKeys();
+  const DiscreteKeys reversedKeys(keys.rbegin(), keys.rend());
+  std::vector<std::pair<DiscreteValues, double>> result;
+  for (const auto& assignment : DiscreteValues::CartesianProduct(reversedKeys)) {
+    result.emplace_back(assignment, evaluate(assignment));
+  }
+  return result;
+}
+
+/* ************************************************************************ */
+DiscreteFactor::shared_ptr DiscreteFactor::multiply(
+    const DiscreteFactor::shared_ptr& factor) const {
+  if (const auto table = std::dynamic_pointer_cast<TableFactor>(factor)) {
+    // The cast and dereference borrow the existing table without copying it.
+    // Only this factor's table representation and the product are materialized;
+    // make_shared moves the temporary product into its owned allocation.
+    return std::make_shared<TableFactor>(*table * toTableFactor());
+  }
+  return std::make_shared<DecisionTreeFactor>(
+      this->operator*(factor->toDecisionTreeFactor()));
+}
+
+/* ************************************************************************ */
+TableFactor DiscreteFactor::toTableFactor() const {
+  return TableFactor(toDecisionTreeFactor());
 }
 
 /* ************************************************************************ */

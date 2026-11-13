@@ -17,12 +17,14 @@
  */
 
 #include <gtsam/base/Matrix.h>
+#include <gtsam/base/MatrixConstants.h>
 #include <gtsam/base/Testable.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/linear/JointMarginal.h>
 #include <gtsam/navigation/FootPoseFactors.h>
 #include <gtsam/navigation/LeggedEstimator.h>
 #include <gtsam/navigation/LeggedEstimatorFactors.h>
+#include <gtsam/navigation/NavState.h>
 #include <gtsam/navigation/NavStateImuEKF.h>
 #include <gtsam/nonlinear/ExpressionFactor.h>
 #include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
@@ -31,11 +33,11 @@
 #include <gtsam/nonlinear/PriorFactor.h>
 
 #include <Eigen/Cholesky>
+#include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
 #include <map>
 #include <set>
-#include <sstream>
 #include <stdexcept>
 
 namespace gtsam {
@@ -335,11 +337,10 @@ void throwIfInvalidCorrelatedVelocityMeasurement(
 }
 
 SharedNoiseModel fixedLagBiasPriorModel() {
-  Vector6 sigmas;
   // The contact-event smoother only constrains bias intermittently, so a tight
   // prior keeps the single persistent bias variable from absorbing large
   // translational drift between sparse contact updates.
-  sigmas << 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6;
+  Vector6 sigmas{1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6};
   return Diagonal::Sigmas(sigmas);
 }
 
@@ -462,8 +463,6 @@ std::shared_ptr<PreintegrationCombinedParams> combinedPreintegrationParams(
         params.preintegrationParams->accelerometerCovariance;
     combinedParams->integrationCovariance =
         params.preintegrationParams->integrationCovariance;
-    combinedParams->use2ndOrderCoriolis =
-        params.preintegrationParams->use2ndOrderCoriolis;
     combinedParams->omegaCoriolis = params.preintegrationParams->omegaCoriolis;
     combinedParams->body_P_sensor = params.preintegrationParams->body_P_sensor;
   }
@@ -489,11 +488,10 @@ Point3 imuMeasurement(const Pose3& body_P_imu, const Vector3& bodyPoint);
 namespace {
 
 SharedNoiseModel fullContactInitializationBasePrior() {
-  Vector9 sigmas;
   // Only roll, pitch, and base height should move appreciably during the
   // contact-based inverse-kinematics solve. Planar translation, yaw, and
   // velocity are treated as fixed gauge choices for initialization.
-  sigmas << 1.0, 1.0, 1e-6, 1e-6, 1e-6, 1.0, 1e-6, 1e-6, 1e-6;
+  Vector9 sigmas{1.0, 1.0, 1e-6, 1e-6, 1e-6, 1.0, 1e-6, 1e-6, 1e-6};
   return Diagonal::Sigmas(sigmas);
 }
 

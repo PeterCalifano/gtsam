@@ -15,14 +15,14 @@
  * @brief test PinholeCamera class
  */
 
-#include <gtsam/geometry/PinholeCamera.h>
-#include <gtsam/geometry/Cal3_S2.h>
-#include <gtsam/geometry/Cal3Bundler.h>
-#include <gtsam/geometry/Pose2.h>
+#include <CppUnitLite/TestHarness.h>
+#include <gtsam/base/MatrixConstants.h>
 #include <gtsam/base/Testable.h>
 #include <gtsam/base/numericalDerivative.h>
-
-#include <CppUnitLite/TestHarness.h>
+#include <gtsam/geometry/Cal3Bundler.h>
+#include <gtsam/geometry/Cal3_S2.h>
+#include <gtsam/geometry/PinholeCamera.h>
+#include <gtsam/geometry/Pose2.h>
 
 #include <cmath>
 #include <iostream>
@@ -115,7 +115,7 @@ TEST( PinholeCamera, lookat)
   Camera camera2 = Camera::Lookat(C2, Point3(0,0,0), Point3(0,0,1));
 
   Matrix R = camera2.pose().rotation().matrix();
-  Matrix I = trans(R)*R;
+  Matrix I = R.transpose() * R;
   EXPECT(assert_equal(I, I_3x3));
 }
 

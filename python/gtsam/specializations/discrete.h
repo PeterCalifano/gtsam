@@ -15,7 +15,9 @@
 // py::bind_vector<std::vector<gtsam::DiscreteKey>>(m_, "DiscreteKeys");
 
 py::bind_map<gtsam::Assignment<gtsam::Key>>(m_, "AssignmentKey");
-py::bind_map<gtsam::DiscreteValues>(m_, "DiscreteValues");
+py::class_<gtsam::DiscreteValues, gtsam::Assignment<gtsam::Key>>(
+    m_, "DiscreteValues")
+    .def(py::init<>());
 
 #include <gtsam/discrete/DiscreteValues.h>
 /// DiscreteValues print function for wrapper
@@ -31,3 +33,8 @@ m_.def(
     },
     py::arg("values"), py::arg("s") = "",
     py::arg("keyFormatter") = gtsam::DefaultKeyFormatter);
+
+// Conditionals no longer derive from DecisionTreeFactor, so allow them where a
+// DecisionTreeFactor is expected, e.g. `factor * conditional` for Bayes' rule.
+py::implicitly_convertible<gtsam::DiscreteConditional,
+                           gtsam::DecisionTreeFactor>();

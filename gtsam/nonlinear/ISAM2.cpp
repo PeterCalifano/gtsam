@@ -23,6 +23,7 @@
 #include <gtsam/base/debug.h>
 #include <gtsam/base/timing.h>
 #include <gtsam/inference/BayesTree-inst.h>
+#include <gtsam/linear/NoiseModel.h>
 #include <gtsam/linear/GaussianBayesTreeQueries.h>
 #include <gtsam/nonlinear/LinearContainerFactor.h>
 
@@ -30,6 +31,7 @@
 #include <map>
 #include <utility>
 #include <variant>
+#include <vector>
 #include <cassert>
 
 using namespace std;
@@ -99,22 +101,23 @@ GaussianFactorGraph ISAM2::relinearizeAffectedFactors(
         useCachedLinear = false;
     }
     if (inside) {
-      if (useCachedLinear) {
+      GaussianFactor::shared_ptr linearFactor;
+      if (useCachedLinear && linearFactors_[idx]) {
 #ifdef GTSAM_EXTRA_CONSISTENCY_CHECKS
-        assert(linearFactors_[idx]);
         assert(linearFactors_[idx]->keys() == nonlinearFactors_[idx]->keys());
 #endif
-        linearized.push_back(linearFactors_[idx]);
+        linearFactor = linearFactors_[idx];
       } else {
-        auto linearFactor = nonlinearFactors_[idx]->linearize(theta_);
-        linearized.push_back(linearFactor);
+        linearFactor = nonlinearFactors_[idx]->linearize(theta_);
         if (params_.cacheLinearizedFactors) {
 #ifdef GTSAM_EXTRA_CONSISTENCY_CHECKS
-          assert(linearFactors_[idx]->keys() == linearFactor->keys());
+          assert(!linearFactor ||
+                 linearFactor->keys() == nonlinearFactors_[idx]->keys());
 #endif
           linearFactors_[idx] = linearFactor;
         }
       }
+      if (linearFactor) linearized.push_back(linearFactor);
     }
   }
   gttoc(check_candidates_and_linearize);
@@ -195,11 +198,16 @@ void ISAM2::recalculateBatch(const ISAM2UpdateParams& updateParams,
   for (const auto& [key, _] : variableIndex_) {
     affectedKeysSet->insert(key);
   }
-  // Removed unused keys:
-  VariableIndex affectedFactorsVarIndex = variableIndex_;
-
-  affectedFactorsVarIndex.removeUnusedVariables(result->unusedKeys.begin(),
-                                                result->unusedKeys.end());
+  // Reuse the index unless removal requires a filtered copy. Batch reorders
+  // without factor removal need no duplicate of the entire variable index.
+  std::optional<VariableIndex> filteredVariableIndex;
+  if (!result->unusedKeys.empty()) {
+    filteredVariableIndex.emplace(variableIndex_);
+    filteredVariableIndex->removeUnusedVariables(result->unusedKeys.begin(),
+                                                  result->unusedKeys.end());
+  }
+  const VariableIndex& affectedFactorsVarIndex =
+      filteredVariableIndex ? *filteredVariableIndex : variableIndex_;
 
   for (const Key key : result->unusedKeys) {
     affectedKeysSet->erase(key);
@@ -390,6 +398,7 @@ void ISAM2::recalculateIncremental(const ISAM2UpdateParams& updateParams,
 void ISAM2::addVariables(const Values& newTheta,
                          ISAM2Result::DetailedResults* detail) {
   gttic(addNewVariables);
+  if (newTheta.empty()) return;
 
   theta_.insert(newTheta);
   if (ISDEBUG("ISAM2 AddVariables")) newTheta.print("The new variables are: ");
@@ -410,7 +419,16 @@ void ISAM2::addVariables(const Values& newTheta,
 void ISAM2::removeVariables(const KeySet& unusedKeys) {
   gttic(removeVariables);
 
-  variableIndex_.removeUnusedVariables(unusedKeys.begin(), unusedKeys.end());
+  // Values added before any factor references them have no VariableIndex
+  // entry, but still need the remaining ISAM2 state removed.
+  KeySet indexedUnusedKeys;
+  for (Key key : unusedKeys) {
+    if (variableIndex_.find(key) != variableIndex_.end()) {
+      indexedUnusedKeys.insert(key);
+    }
+  }
+  variableIndex_.removeUnusedVariables(indexedUnusedKeys.begin(),
+                                       indexedUnusedKeys.end());
   for (Key key : unusedKeys) {
     delta_.erase(key);
     deltaNewton_.erase(key);
@@ -518,12 +536,15 @@ ISAM2Result ISAM2::update(const NonlinearFactorGraph& newFactors,
   if (!result.unusedKeys.empty()) removeVariables(result.unusedKeys);
   result.cliques = this->nodes().size();
 
-  // 10. Track fill-in: record nnz and update baseline after batch reorders.
-  result.treeNnz = treeNnz();
-  // Update baseline on first update or after any batch reorder (adaptive or
-  // the existing 65% affected-variables threshold).
-  if (nnzAfterLastReorder_ == 0 || result.batchReorderTriggered) {
-    nnzAfterLastReorder_ = result.treeNnz;
+  // Counting nonzeros traverses every clique. Keep this global work out of
+  // ordinary incremental updates unless the caller requests it.
+  if (params_.enableAdaptiveReorder || params_.enableDetailedResults) {
+    result.treeNnz = treeNnz();
+    // Update baseline on first update or after any batch reorder (adaptive or
+    // the existing 65% affected-variables threshold).
+    if (nnzAfterLastReorder_ == 0 || result.batchReorderTriggered) {
+      nnzAfterLastReorder_ = result.treeNnz;
+    }
   }
 
   if (params_.evaluateNonlinearError)
@@ -585,10 +606,16 @@ void ISAM2::marginalizeLeaves(
         // Check if parent contains a marginalized leaf variable.  Only need to
         // check the first variable because it is the closest to the leaves.
         sharedClique parent = clique->parent();
-        if (leafKeys.exists(parent->conditional()->front()))
-          clique = parent;
-        else
+        if (!leafKeys.exists(parent->conditional()->front())) break;
+        // Processing the parent only removes (and summarizes) this clique if
+        // it depends on a marginalized variable. Otherwise, e.g. a leaf whose
+        // separator holds only kept variables below a parent that mixes
+        // marginalized and kept frontals, marginalize it here.
+        const auto parents = clique->conditional()->parents();
+        if (std::none_of(parents.begin(), parents.end(),
+                         [&](Key key) { return leafKeys.exists(key); }))
           break;
+        clique = parent;
       }
 
       // See if we should remove the whole clique
@@ -690,9 +717,22 @@ void ISAM2::marginalizeLeaves(
         while (leafKeys.exists(cg->keys()[nToRemove])) ++nToRemove;
 
         // Make the clique's matrix appear as a subset
+        const DenseIndex oldRowStart = cg->matrixObject().rowStart();
         const DenseIndex dimToRemove = cg->matrixObject().offset(nToRemove);
         cg->matrixObject().firstBlock() += nToRemove;
         cg->matrixObject().rowStart() = dimToRemove;
+
+        // The noise model holds one sigma per row of the original conditional.
+        // Drop the sigmas of the rows that were removed, so that each remaining
+        // row keeps its own (a Constrained model would otherwise mark soft rows
+        // as hard). offset() is absolute, so subtract the old rowStart(): an
+        // earlier split has already hidden (and dropped) the rows before it.
+        if (cg->get_model() && dimToRemove > oldRowStart) {
+          const Vector sigmas = cg->get_model()->sigmas();
+          const Vector remaining =
+              sigmas.tail(sigmas.size() - (dimToRemove - oldRowStart));
+          cg->setModel((remaining.array() == 0.0).any(), remaining);
+        }
 
         // Change the keys in the clique
         KeyVector originalKeys;
@@ -766,6 +806,22 @@ void ISAM2::marginalizeLeaves(
   if (marginalFactorsIndices){
     *marginalFactorsIndices = std::move(newFactorIndices);
   }
+}
+
+/** An added function specifically to return the marginalFactorIndices
+ * and deletedFactorIndices. Made for the python wrapping
+ * of marginalizeLeaves
+ */
+std::pair<FactorIndices, FactorIndices> ISAM2::marginalizeLeavesWithIndices(const FastList<Key>& leafKeys) {
+  FactorIndices marginal;
+  FactorIndices deleted;
+
+  marginalizeLeaves(
+      leafKeys,
+      &marginal,
+      &deleted);
+
+  return {marginal, deleted};
 }
 
 /* ************************************************************************* */
@@ -872,10 +928,17 @@ Values ISAM2::calculateEstimate() const {
   gttoc(Expmap);
 }
 
+#ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
 /* ************************************************************************* */
 const Value& ISAM2::calculateEstimate(Key key) const {
   const Vector& delta = getDelta()[key];
   return *theta_.at(key).retract_(delta);
+}
+#endif
+
+/* ************************************************************************* */
+Values ISAM2::calculateEstimate(const KeyVector& keys) const {
+  return theta_.retract(getDelta(), keys);
 }
 
 /* ************************************************************************* */
@@ -926,9 +989,47 @@ double ISAM2::error(const VectorValues& x) const {
 VectorValues ISAM2::gradientAtZero() const {
   // Create result
   VectorValues g;
+  bool hasConstrainedConditional = false;
 
   // Sum up contributions for each clique
-  for (const auto& root : this->roots()) root->addGradientAtZero(&g);
+  for (const auto& root : this->roots())
+    root->addGradientAtZero(&g, &hasConstrainedConditional);
+
+  if (!hasConstrainedConditional) return g;
+
+  // A constrained conditional makes the corresponding frontal gradient
+  // components undefined. Find those components only for constrained trees.
+  FastMap<Key, std::vector<char>> constrainedComponents;
+  for (const auto& [key, clique] : this->nodes()) {
+    const auto& conditional = clique->conditional();
+    if (key != conditional->firstFrontalKey()) continue;
+
+    const auto& model = conditional->get_model();
+    if (!model || !model->isConstrained()) continue;
+    const auto constrainedModel =
+        std::dynamic_pointer_cast<noiseModel::Constrained>(model);
+    if (!constrainedModel) continue;
+
+    DenseIndex position = 0;
+    for (auto it = conditional->beginFrontals();
+         it != conditional->endFrontals(); ++it) {
+      const DenseIndex dim = conditional->getDim(it);
+      auto& mask = constrainedComponents[*it];
+      if (mask.empty()) mask.assign(static_cast<size_t>(dim), 0);
+      for (DenseIndex i = 0; i < dim; ++i) {
+        mask[static_cast<size_t>(i)] =
+            constrainedModel->constrained(static_cast<size_t>(position + i));
+      }
+      position += dim;
+    }
+  }
+
+  for (const auto& [key, mask] : constrainedComponents) {
+    Vector& gradient = g.at(key);
+    for (size_t i = 0; i < mask.size(); ++i) {
+      if (mask[i]) gradient(static_cast<DenseIndex>(i)) = 0.0;
+    }
+  }
 
   return g;
 }
