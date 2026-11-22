@@ -31,11 +31,53 @@
 #endif
 
 /* External or standard includes */
+#include <Eigen/Eigenvalues>
 #include <ostream>
+#include <stdexcept>
+#include <string>
 
 namespace gtsam {
 
 using namespace std;
+
+//------------------------------------------------------------------------------
+// Struct CombinedPreintegrationSampleNoise
+//------------------------------------------------------------------------------
+namespace {
+
+/// Throw unless a covariance is finite, symmetric and positive semidefinite.
+template <int N>
+void validateCovariance(const Eigen::Matrix<double, N, N>& covariance,
+                        const char* name) {
+  // Relative tolerances accept rounding from products such as R * S * R'.
+  constexpr double kTolerance = 1e-12;
+  bool isValid = covariance.allFinite() &&
+                 (covariance - covariance.transpose()).cwiseAbs().maxCoeff() <=
+                     kTolerance * covariance.cwiseAbs().maxCoeff();
+  if (isValid) {
+    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, N, N>> solver(
+        covariance, Eigen::EigenvaluesOnly);
+    isValid = solver.info() == Eigen::Success &&
+              solver.eigenvalues().minCoeff() >=
+                  -kTolerance * solver.eigenvalues().maxCoeff();
+  }
+  if (!isValid) {
+    throw invalid_argument(
+        string("CombinedPreintegrationSampleNoise: ") + name +
+        " must be finite, symmetric and positive semidefinite.");
+  }
+}
+
+}  // namespace
+
+void CombinedPreintegrationSampleNoise::validate() const {
+  validateCovariance(accelerometerSampleCovariance,
+                     "accelerometerSampleCovariance");
+  validateCovariance(gyroscopeSampleCovariance, "gyroscopeSampleCovariance");
+  if (motionCovariance) {
+    validateCovariance(*motionCovariance, "motionCovariance");
+  }
+}
 
 //------------------------------------------------------------------------------
 // Inner class PreintegrationCombinedParams
@@ -84,10 +126,17 @@ namespace {
 
 using Matrix15 = Eigen::Matrix<double, 15, 15>;
 
-/** Propagate Combined PIM covariance using its sparse 5-by-5 block form. */
+/**
+ * Propagate Combined PIM covariance using its sparse 5-by-5 block form.
+ * The sample covariances are in sensor axes. motionCovariance, when not null,
+ * is a symmetric 9x9 block already in the end-of-step preintegration chart.
+ */
 template <bool kTangentStructure, bool kFullGyroscopeStructure>
 void propagateCombinedCovariance(Matrix15* covariance, const Matrix9& A,
                                  const Matrix93& B, const Matrix93& C,
+                                 const Matrix3& accelerometerSampleCovariance,
+                                 const Matrix3& gyroscopeSampleCovariance,
+                                 const Matrix9* motionCovariance,
                                  const PreintegrationCombinedParams& params,
                                  double dt, bool hasSensorPose) {
   // State blocks are ordered R,p,v,b_a,b_g. The Combined transition is
@@ -199,21 +248,18 @@ void propagateCombinedCovariance(Matrix15* covariance, const Matrix9& A,
   covariance->block<3, 3>(12, 9) = FP.block<3, 3>(12, 9);
   covariance->block<3, 3>(12, 12) = FP.block<3, 3>(12, 12);
 
-  // Add continuous-time measurement and bias noise to the affected blocks.
-  const Matrix3 scaledAccelerometerCovariance =
-      params.accelerometerCovariance / dt;
-  const Matrix3 scaledGyroscopeCovariance = params.gyroscopeCovariance / dt;
-  const Matrix3 B1Covariance = B1 * scaledAccelerometerCovariance;
-  const Matrix3 B2Covariance = B2 * scaledAccelerometerCovariance;
+  // Add measurement, integration and bias noise to the affected blocks.
+  const Matrix3 B1Covariance = B1 * accelerometerSampleCovariance;
+  const Matrix3 B2Covariance = B2 * accelerometerSampleCovariance;
   covariance->block<3, 3>(0, 0).noalias() +=
-      C0 * scaledGyroscopeCovariance * C0.transpose();
+      C0 * gyroscopeSampleCovariance * C0.transpose();
   covariance->block<3, 3>(3, 3).noalias() +=
       B1Covariance * B1.transpose() + dt * params.integrationCovariance;
   covariance->block<3, 3>(6, 3).noalias() += B2Covariance * B1.transpose();
   covariance->block<3, 3>(6, 6).noalias() += B2Covariance * B2.transpose();
   if (useFullGyroscope) {
-    const Matrix3 C1Covariance = C1 * scaledGyroscopeCovariance;
-    const Matrix3 C2Covariance = C2 * scaledGyroscopeCovariance;
+    const Matrix3 C1Covariance = C1 * gyroscopeSampleCovariance;
+    const Matrix3 C2Covariance = C2 * gyroscopeSampleCovariance;
     covariance->block<3, 3>(3, 0).noalias() += C1Covariance * C0.transpose();
     covariance->block<3, 3>(3, 3).noalias() += C1Covariance * C1.transpose();
     covariance->block<3, 3>(6, 0).noalias() += C2Covariance * C0.transpose();
@@ -222,6 +268,10 @@ void propagateCombinedCovariance(Matrix15* covariance, const Matrix9& A,
   }
   covariance->block<3, 3>(9, 9).noalias() += dt * params.biasAccCovariance;
   covariance->block<3, 3>(12, 12).noalias() += dt * params.biasOmegaCovariance;
+  if (motionCovariance) {
+    // The upper off-diagonal blocks are overwritten from the lower ones below.
+    covariance->topLeftCorner<9, 9>() += *motionCovariance;
+  }
 
   for (int row = 1; row < 5; ++row) {
     for (int column = 0; column < row; ++column) {
@@ -229,6 +279,44 @@ void propagateCombinedCovariance(Matrix15* covariance, const Matrix9& A,
           covariance->block<3, 3>(3 * row, 3 * column).transpose();
     }
   }
+}
+
+/// Reject a nonpositive sample duration before any change to the PIM.
+void checkPositiveDuration(double dt) {
+  if (dt <= 0) {
+    throw std::runtime_error(
+        "PreintegratedCombinedMeasurements::integrateMeasurement: dt <=0");
+  }
+}
+
+/// Per-call noise after its checks, with symmetric sample covariances.
+struct CheckedSampleNoise {
+  Matrix3 accelerometerSampleCovariance;
+  Matrix3 gyroscopeSampleCovariance;
+  const Matrix9* motionCovariance;  ///< Start-of-step chart, or null.
+};
+
+/**
+ * Check the duration and the per-call noise before any change to the PIM, and
+ * remove the small asymmetry that validate() tolerates.
+ */
+template <class PreintegrationType>
+CheckedSampleNoise checkSampleNoise(
+    double dt, const CombinedPreintegrationSampleNoise& noise) {
+  checkPositiveDuration(dt);
+  noise.validate();
+  if constexpr (!std::is_same_v<PreintegrationType, ManifoldPreintegration>) {
+    if (noise.motionCovariance) {
+      throw invalid_argument(
+          "PreintegratedCombinedMeasurements: motionCovariance is defined only "
+          "in the ManifoldPreintegration chart.");
+    }
+  }
+  return {0.5 * (noise.accelerometerSampleCovariance +
+                 noise.accelerometerSampleCovariance.transpose()),
+          0.5 * (noise.gyroscopeSampleCovariance +
+                 noise.gyroscopeSampleCovariance.transpose()),
+          noise.motionCovariance ? &*noise.motionCovariance : nullptr};
 }
 
 }  // namespace
@@ -253,8 +341,10 @@ void PreintegratedCombinedMeasurementsT<
       std::is_same_v<PreintegrationType, TangentPreintegration>;
   constexpr bool kFullGyroscopeStructure =
       std::is_same_v<PreintegrationType, GalileanPreintegration>;
+  // Continuous-time densities divided by dt give the sample covariances.
   propagateCombinedCovariance<kTangentStructure, kFullGyroscopeStructure>(
-      &preintMeasCov_, A, B, C, this->p(), dt,
+      &preintMeasCov_, A, B, C, this->p().accelerometerCovariance / dt,
+      this->p().gyroscopeCovariance / dt, nullptr, this->p(), dt,
       static_cast<bool>(this->p().body_P_sensor));
 }
 
@@ -264,16 +354,77 @@ CombinedPreintegrationStep
 PreintegratedCombinedMeasurementsT<PreintegrationType>::
     integrateMeasurementWithDynamics(const Vector3& measuredAcc,
                                      const Vector3& measuredOmega, double dt) {
-  if (dt <= 0) {
-    throw std::runtime_error(
-        "PreintegratedCombinedMeasurements::integrateMeasurement: dt <=0");
-  }
+  checkPositiveDuration(dt);
 
   // Update preintegrated measurements and their covariance exactly as
   // integrateMeasurement() does.
+  CombinedPreintegrationStep result;
+  integrateWithSampleNoise(
+      measuredAcc, measuredOmega, dt, this->p().accelerometerCovariance / dt,
+      this->p().gyroscopeCovariance / dt, nullptr, &result);
+  return result;
+}
+
+//------------------------------------------------------------------------------
+template <class PreintegrationType>
+void PreintegratedCombinedMeasurementsT<PreintegrationType>::
+    integrateMeasurement(const Vector3& measuredAcc,
+                         const Vector3& measuredOmega, double dt,
+                         const CombinedPreintegrationSampleNoise& noise) {
+  const CheckedSampleNoise checked =
+      checkSampleNoise<PreintegrationType>(dt, noise);
+  integrateWithSampleNoise(
+      measuredAcc, measuredOmega, dt, checked.accelerometerSampleCovariance,
+      checked.gyroscopeSampleCovariance, checked.motionCovariance, nullptr);
+}
+
+//------------------------------------------------------------------------------
+template <class PreintegrationType>
+CombinedPreintegrationStep
+PreintegratedCombinedMeasurementsT<PreintegrationType>::
+    integrateMeasurementWithDynamics(
+        const Vector3& measuredAcc, const Vector3& measuredOmega, double dt,
+        const CombinedPreintegrationSampleNoise& noise) {
+  const CheckedSampleNoise checked =
+      checkSampleNoise<PreintegrationType>(dt, noise);
+  CombinedPreintegrationStep result;
+  integrateWithSampleNoise(
+      measuredAcc, measuredOmega, dt, checked.accelerometerSampleCovariance,
+      checked.gyroscopeSampleCovariance, checked.motionCovariance, &result);
+  return result;
+}
+
+//------------------------------------------------------------------------------
+template <class PreintegrationType>
+void PreintegratedCombinedMeasurementsT<PreintegrationType>::
+    integrateWithSampleNoise(const Vector3& measuredAcc,
+                             const Vector3& measuredOmega, double dt,
+                             const Matrix3& accelerometerSampleCovariance,
+                             const Matrix3& gyroscopeSampleCovariance,
+                             const Matrix9* motionCovariance,
+                             CombinedPreintegrationStep* step) {
+  // The motion covariance is given in the body axes at the start of the step.
+  const Rot3 oldRotation = motionCovariance ? this->deltaRij() : Rot3();
+
+  // Update preintegrated measurements.
   Matrix9 A;  // Jacobian wrt preintegrated measurements without bias (df/dx)
   Matrix93 B, C;  // Jacobian of state wrpt accel bias and omega bias.
   PreintegrationType::update(measuredAcc, measuredOmega, dt, &A, &B, &C);
+
+  // The Manifold chart expresses translation errors in the end-of-step body
+  // axes, so E = diag(I, R', R') with this step's rotation R = old' * new.
+  // A right perturbation of the end-of-step attitude needs no change.
+  Matrix9 mappedMotionCovariance;
+  if (motionCovariance) {
+    const Matrix3 stepRotationTranspose =
+        this->deltaRij().matrix().transpose() * oldRotation.matrix();
+    Matrix9 motionMap = I_9x9;
+    motionMap.block<3, 3>(3, 3) = stepRotationTranspose;
+    motionMap.block<3, 3>(6, 6) = stepRotationTranspose;
+    const Matrix9 mapped =
+        motionMap * *motionCovariance * motionMap.transpose();
+    mappedMotionCovariance = 0.5 * (mapped + mapped.transpose());
+  }
 
   constexpr bool kTangentStructure =
       std::is_same_v<PreintegrationType, TangentPreintegration>;
@@ -281,45 +432,49 @@ PreintegratedCombinedMeasurementsT<PreintegrationType>::
       std::is_same_v<PreintegrationType, GalileanPreintegration>;
   const bool hasSensorPose = static_cast<bool>(this->p().body_P_sensor);
   propagateCombinedCovariance<kTangentStructure, kFullGyroscopeStructure>(
-      &preintMeasCov_, A, B, C, this->p(), dt, hasSensorPose);
+      &preintMeasCov_, A, B, C, accelerometerSampleCovariance,
+      gyroscopeSampleCovariance,
+      motionCovariance ? &mappedMotionCovariance : nullptr, this->p(), dt,
+      hasSensorPose);
+  if (!step) {
+    return;
+  }
 
   // Express the same update densely, P_next = F P F' + Q, with the block
   // structure propagateCombinedCovariance() exploits: the gyro bias couples
   // into position and velocity only for Galilean preintegration or a displaced
   // sensor.
   const bool useFullGyroscope = kFullGyroscopeStructure || hasSensorPose;
-  CombinedPreintegrationStep result;
-  result.transition.block<9, 9>(0, 0) = A;
-  result.transition.block<9, 3>(0, 9) = B;
-  result.transition.block<3, 3>(0, 12) = C.topRows<3>();
-  if (useFullGyroscope) {
-    result.transition.block<6, 3>(3, 12) = C.bottomRows<6>();
-  }
-  result.transition.block<6, 6>(9, 9).setIdentity();
+  step->transition.block<9, 9>(0, 0) = A;
+  step->transition.block<9, 3>(0, 9) = B;
+  step->transition.block<3, 3>(0, 12) = C.topRows<3>();
 
-  result.gyroSampleCovariance = this->p().gyroscopeCovariance / dt;
-  result.gyroNoiseMap.topRows<3>() = C.topRows<3>();
+  step->gyroSampleCovariance = gyroscopeSampleCovariance;
+  step->gyroNoiseMap.topRows<3>() = C.topRows<3>();
   if (useFullGyroscope) {
-    result.gyroNoiseMap.middleRows<6>(3) = C.bottomRows<6>();
+    step->transition.block<6, 3>(3, 12) = C.bottomRows<6>();
+    step->gyroNoiseMap.middleRows<6>(3) = C.bottomRows<6>();
   }
+  step->transition.block<6, 6>(9, 9).setIdentity();
 
   // Measurement, integration and bias random-walk noise of this sample.
-  const Matrix3 scaledAccelerometerCovariance =
-      this->p().accelerometerCovariance / dt;
   Eigen::Matrix<double, 9, 3> accelerometerNoiseMap =
       Eigen::Matrix<double, 9, 3>::Zero();
   accelerometerNoiseMap.bottomRows<6>() = B.bottomRows<6>();
-  result.processCovariance.block<9, 9>(0, 0).noalias() =
-      accelerometerNoiseMap * scaledAccelerometerCovariance *
+  step->processCovariance.block<9, 9>(0, 0).noalias() =
+      accelerometerNoiseMap * accelerometerSampleCovariance *
           accelerometerNoiseMap.transpose() +
-      result.gyroNoiseMap.topRows<9>() * result.gyroSampleCovariance *
-          result.gyroNoiseMap.topRows<9>().transpose();
-  result.processCovariance.block<3, 3>(3, 3) +=
+      step->gyroNoiseMap.topRows<9>() * step->gyroSampleCovariance *
+          step->gyroNoiseMap.topRows<9>().transpose();
+  step->processCovariance.block<3, 3>(3, 3) +=
       dt * this->p().integrationCovariance;
-  result.processCovariance.block<3, 3>(9, 9) = dt * this->p().biasAccCovariance;
-  result.processCovariance.block<3, 3>(12, 12) =
+  if (motionCovariance) {
+    // Keep motion error independent of observations driven by this gyro sample.
+    step->processCovariance.block<9, 9>(0, 0) += mappedMotionCovariance;
+  }
+  step->processCovariance.block<3, 3>(9, 9) = dt * this->p().biasAccCovariance;
+  step->processCovariance.block<3, 3>(12, 12) =
       dt * this->p().biasOmegaCovariance;
-  return result;
 }
 
 //------------------------------------------------------------------------------

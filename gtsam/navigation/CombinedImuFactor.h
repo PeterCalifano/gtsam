@@ -27,6 +27,7 @@
 #include <gtsam/navigation/PreintegrationCombinedParams.h>
 #include <gtsam/nonlinear/NoiseModelFactorN.h>
 
+#include <optional>
 #include <type_traits>
 
 namespace gtsam {
@@ -53,7 +54,46 @@ struct GTSAM_EXPORT CombinedPreintegrationStep {
       Eigen::Matrix<double, 15, 3>::Zero();
 
   /// Gyroscope covariance density divided by the sample duration.
+  /// The per-call overload supplies the held reading's covariance directly.
+  /// Both forms use sensor axes and (rad/s)^2.
   Matrix3 gyroSampleCovariance = Matrix3::Zero();
+};
+
+/**
+ * Noise supplied per call for one held IMU sample.
+ *
+ * The density call uses accelerometerCovariance / dt and gyroscopeCovariance
+ * / dt, which models an independent reading averaged over that duration. A
+ * held sensor reading has its own discrete covariance. For example, a held
+ * accelerometer reading contributes dt^2 times its covariance to velocity
+ * variance at zero rotation and with aligned sensor axes.
+ * The optional motionCovariance models increment error independent of the
+ * sensor draw, such as motion missed during the hold. Its rows are ordered
+ * [rotation, position, velocity]. Rotation (rad) is a right perturbation of
+ * the end-of-step attitude. Position (m) and velocity (m/s) use the body axes
+ * at the start of the step and refer to the body origin. Bias random walk and
+ * integrationCovariance come from the parameters.
+ * Each call contributes independent noise, even when the same physical
+ * reading is used in several calls.
+ */
+struct GTSAM_EXPORT CombinedPreintegrationSampleNoise {
+  /// Accelerometer sample covariance in sensor axes, (m/s^2)^2.
+  Matrix3 accelerometerSampleCovariance = Matrix3::Zero();
+
+  /// Gyroscope sample covariance in sensor axes, (rad/s)^2.
+  Matrix3 gyroscopeSampleCovariance = Matrix3::Zero();
+
+  /// Optional increment covariance [rotation, position, velocity], supported
+  /// by ManifoldPreintegration. See the frame conventions above.
+  std::optional<Matrix9> motionCovariance;
+
+  /**
+   * Check that every covariance is finite. Test symmetry to 1e-12 times the
+   * largest absolute entry and positive semidefiniteness to 1e-12 times the
+   * largest eigenvalue.
+   * @throws std::invalid_argument naming the first invalid covariance.
+   */
+  void validate() const;
 };
 
 #ifdef GTSAM_LIEGROUP_PREINTEGRATION
@@ -284,6 +324,42 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT : public PreintegrationTyp
   CombinedPreintegrationStep integrateMeasurementWithDynamics(
       const Vector3& measuredAcc, const Vector3& measuredOmega, double dt);
 
+  /**
+   * Add one IMU measurement whose noise is given for this call.
+   *
+   * The covariance update is P_next = F P F' + B S_a B' + C S_g C' +
+   * E Q_motion E' + dt Q_biasRandomWalk + dt Q_integration, where B and C are
+   * the same sample maps the density call uses. E carries the start-of-step
+   * position and velocity rows into the end-of-step chart. With S_a =
+   * accelerometerCovariance / dt, S_g = gyroscopeCovariance / dt and no
+   * motion covariance, the result equals integrateMeasurement(measuredAcc,
+   * measuredOmega, dt). Both overloads use the same mean and bias Jacobians.
+   *
+   * @param measuredAcc Acceleration in the sensor frame, m/s^2.
+   * @param measuredOmega Angular velocity in the sensor frame, rad/s.
+   * @param dt Positive sample duration in seconds.
+   * @param noise Noise of this sample; see CombinedPreintegrationSampleNoise.
+   * @throws std::runtime_error If dt is nonpositive.
+   * @throws std::invalid_argument If noise fails validate(), or if a motion
+   * covariance is given to a backend other than ManifoldPreintegration.
+   * Both checks precede any change to this object.
+   */
+  void integrateMeasurement(const Vector3& measuredAcc,
+                            const Vector3& measuredOmega, double dt,
+                            const CombinedPreintegrationSampleNoise& noise);
+
+  /**
+   * Add one IMU measurement with per-call noise and return its dynamics.
+   *
+   * Same update and checks as the per-call integrateMeasurement() overload.
+   * processCovariance includes the motion term. gyroSampleCovariance is the
+   * symmetric S_g and gyroNoiseMap retains the sensor mapping, so another
+   * measurement driven by the same gyro sample shares the sensor noise.
+   */
+  CombinedPreintegrationStep integrateMeasurementWithDynamics(
+      const Vector3& measuredAcc, const Vector3& measuredOmega, double dt,
+      const CombinedPreintegrationSampleNoise& noise);
+
   /// @}
 
 #ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
@@ -296,6 +372,21 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT : public PreintegrationTyp
 #endif
 
  private:
+  /**
+   * Update shared by integrateMeasurementWithDynamics() and the per-call
+   * overloads, after their dt and noise checks. integrateMeasurement() without
+   * noise keeps its own update. The covariances are symmetric sample
+   * covariances in sensor axes. motionCovariance is in the start-of-step
+   * chart, or null. If not null, step must point to a default-initialized
+   * result, which receives the dense form of the update.
+   */
+  void integrateWithSampleNoise(const Vector3& measuredAcc,
+                                const Vector3& measuredOmega, double dt,
+                                const Matrix3& accelerometerSampleCovariance,
+                                const Matrix3& gyroscopeSampleCovariance,
+                                const Matrix9* motionCovariance,
+                                CombinedPreintegrationStep* step);
+
 #if GTSAM_ENABLE_BOOST_SERIALIZATION  ///
   /// Serialization function
   friend class boost::serialization::access;
